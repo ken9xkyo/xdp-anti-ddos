@@ -1,0 +1,989 @@
+{
+    "annotations": {
+        "list": []
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "id": null,
+    "links": [],
+    "liveNow": true,
+    "panels": [
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 0
+            },
+            "id": 100,
+            "title": "📊 Overview",
+            "type": "row"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "unit": "short"
+                },
+                "overrides": []
+            },
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 0,
+                "y": 1
+            },
+            "id": 1,
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_packets_passed_total",
+                    "legendFormat": "Passed"
+                }
+            ],
+            "title": "Total Passed",
+            "type": "stat"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                    },
+                    "unit": "short"
+                }
+            },
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 4,
+                "y": 1
+            },
+            "id": 2,
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_packets_dropped_total",
+                    "legendFormat": "Dropped"
+                }
+            ],
+            "title": "Total Dropped",
+            "type": "stat"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "unit": "percent",
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "yellow",
+                                "value": 10
+                            },
+                            {
+                                "color": "red",
+                                "value": 50
+                            }
+                        ]
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 8,
+                "y": 1
+            },
+            "id": 3,
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_drop_rate_percent",
+                    "legendFormat": "Drop Rate"
+                }
+            ],
+            "title": "Drop Rate %",
+            "type": "stat"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "unit": "pps"
+                }
+            },
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 12,
+                "y": 1
+            },
+            "id": 4,
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_pps_passed + xdp_pps_dropped",
+                    "legendFormat": "Total PPS"
+                }
+            ],
+            "title": "Current PPS",
+            "type": "stat"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                    },
+                    "unit": "pps"
+                }
+            },
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 16,
+                "y": 1
+            },
+            "id": 5,
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_pps_dropped",
+                    "legendFormat": "Dropped PPS"
+                }
+            ],
+            "title": "Dropped PPS",
+            "type": "stat"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "unit": "bps"
+                }
+            },
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 20,
+                "y": 1
+            },
+            "id": 6,
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_bps_dropped",
+                    "legendFormat": "Dropped BPS"
+                }
+            ],
+            "title": "Dropped BPS",
+            "type": "stat"
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 5
+            },
+            "id": 101,
+            "title": "🎯 XDP Actions & Traffic",
+            "type": "row"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 6,
+                "x": 0,
+                "y": 6
+            },
+            "id": 10,
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "values": [
+                        "value",
+                        "percent"
+                    ]
+                },
+                "pieType": "donut"
+            },
+            "targets": [
+                {
+                    "expr": "xdp_action_total",
+                    "legendFormat": "{{action}}"
+                }
+            ],
+            "title": "XDP Actions",
+            "type": "piechart"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 6,
+                "x": 6,
+                "y": 6
+            },
+            "id": 11,
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "values": [
+                        "value",
+                        "percent"
+                    ]
+                },
+                "pieType": "donut"
+            },
+            "targets": [
+                {
+                    "expr": "xdp_protocol_total",
+                    "legendFormat": "{{protocol}}"
+                }
+            ],
+            "title": "Protocol Distribution",
+            "type": "piechart"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 20,
+                        "lineWidth": 2
+                    },
+                    "unit": "pps"
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "Dropped"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "red",
+                                    "mode": "fixed"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 6
+            },
+            "id": 12,
+            "options": {
+                "legend": {
+                    "calcs": [
+                        "mean",
+                        "max"
+                    ],
+                    "displayMode": "table",
+                    "placement": "bottom"
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_pps_passed",
+                    "legendFormat": "Passed"
+                },
+                {
+                    "expr": "xdp_pps_dropped",
+                    "legendFormat": "Dropped"
+                }
+            ],
+            "title": "Packets Per Second",
+            "type": "timeseries"
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 14
+            },
+            "id": 102,
+            "title": "🔍 Attack Detection",
+            "type": "row"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 0,
+                "y": 15
+            },
+            "id": 20,
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "values": [
+                        "value",
+                        "percent"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_drop_reason_total",
+                    "legendFormat": "{{reason}}"
+                }
+            ],
+            "title": "Drop Reasons",
+            "type": "piechart"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 8,
+                "y": 15
+            },
+            "id": 21,
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "values": [
+                        "value",
+                        "percent"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_reflection_port_total",
+                    "legendFormat": "{{port}}"
+                }
+            ],
+            "title": "Reflection Ports (Source)",
+            "type": "piechart"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "custom": {
+                        "drawStyle": "bars",
+                        "fillOpacity": 80
+                    },
+                    "unit": "short"
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 16,
+                "y": 15
+            },
+            "id": 22,
+            "options": {
+                "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_packet_size_bucket",
+                    "legendFormat": "≤{{le}} bytes"
+                }
+            ],
+            "title": "Packet Size Distribution",
+            "type": "timeseries"
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 23
+            },
+            "id": 103,
+            "title": "🌐 Top IPs",
+            "type": "row"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 0,
+                "y": 24
+            },
+            "id": 30,
+            "options": {
+                "sortBy": [
+                    {
+                        "desc": true,
+                        "displayName": "Value"
+                    }
+                ]
+            },
+            "targets": [
+                {
+                    "expr": "topk(10, xdp_top_blocked_ip)",
+                    "format": "table",
+                    "instant": true
+                }
+            ],
+            "title": "Top 10 Blocked IPs",
+            "transformations": [
+                {
+                    "id": "organize",
+                    "options": {
+                        "excludeByName": {
+                            "Time": true,
+                            "__name__": true,
+                            "instance": true,
+                            "job": true
+                        },
+                        "renameByName": {
+                            "Value": "Dropped",
+                            "ip": "IP"
+                        }
+                    }
+                }
+            ],
+            "type": "table"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "fixedColor": "orange",
+                        "mode": "fixed"
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 8,
+                "y": 24
+            },
+            "id": 31,
+            "options": {
+                "sortBy": [
+                    {
+                        "desc": true,
+                        "displayName": "Value"
+                    }
+                ]
+            },
+            "targets": [
+                {
+                    "expr": "topk(10, xdp_top_pps_ip)",
+                    "format": "table",
+                    "instant": true
+                }
+            ],
+            "title": "Top 10 IPs by PPS",
+            "transformations": [
+                {
+                    "id": "organize",
+                    "options": {
+                        "excludeByName": {
+                            "Time": true,
+                            "__name__": true,
+                            "instance": true,
+                            "job": true
+                        },
+                        "renameByName": {
+                            "Value": "PPS",
+                            "ip": "IP"
+                        }
+                    }
+                }
+            ],
+            "type": "table"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "fixedColor": "green",
+                        "mode": "fixed"
+                    }
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 16,
+                "y": 24
+            },
+            "id": 32,
+            "options": {
+                "sortBy": [
+                    {
+                        "desc": true,
+                        "displayName": "Value"
+                    }
+                ]
+            },
+            "targets": [
+                {
+                    "expr": "topk(10, xdp_top_passed_ip)",
+                    "format": "table",
+                    "instant": true
+                }
+            ],
+            "title": "Top 10 Passed IPs",
+            "transformations": [
+                {
+                    "id": "organize",
+                    "options": {
+                        "excludeByName": {
+                            "Time": true,
+                            "__name__": true,
+                            "instance": true,
+                            "job": true
+                        },
+                        "renameByName": {
+                            "Value": "Passed",
+                            "ip": "IP"
+                        }
+                    }
+                }
+            ],
+            "type": "table"
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 32
+            },
+            "id": 104,
+            "title": "⚡ System Performance",
+            "type": "row"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 10
+                    },
+                    "unit": "short"
+                }
+            },
+            "gridPos": {
+                "h": 6,
+                "w": 12,
+                "x": 0,
+                "y": 33
+            },
+            "id": 40,
+            "options": {
+                "legend": {
+                    "calcs": [
+                        "mean",
+                        "max"
+                    ],
+                    "displayMode": "table",
+                    "placement": "bottom"
+                }
+            },
+            "targets": [
+                {
+                    "expr": "rate(node_softirq_total{type=\"NET_RX\"}[1m])",
+                    "legendFormat": "NET_RX/s"
+                },
+                {
+                    "expr": "rate(node_softirq_total{type=\"NET_TX\"}[1m])",
+                    "legendFormat": "NET_TX/s"
+                }
+            ],
+            "title": "Softirq Rate (NET_RX/TX)",
+            "type": "timeseries"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "yellow",
+                                "value": 50000
+                            },
+                            {
+                                "color": "red",
+                                "value": 100000
+                            }
+                        ]
+                    },
+                    "unit": "short"
+                }
+            },
+            "gridPos": {
+                "h": 6,
+                "w": 12,
+                "x": 12,
+                "y": 33
+            },
+            "id": 41,
+            "options": {
+                "displayMode": "lcd",
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "xdp_map_entries",
+                    "legendFormat": "{{map}}"
+                }
+            ],
+            "title": "BPF Map Entries",
+            "type": "bargauge"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "custom": {
+                        "drawStyle": "bars",
+                        "fillOpacity": 80,
+                        "stacking": {
+                            "mode": "normal"
+                        }
+                    },
+                    "unit": "short"
+                }
+            },
+            "gridPos": {
+                "h": 6,
+                "w": 24,
+                "x": 0,
+                "y": 39
+            },
+            "id": 42,
+            "options": {
+                "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                }
+            },
+            "targets": [
+                {
+                    "expr": "increase(xdp_drop_reason_total[1m])",
+                    "legendFormat": "{{reason}}"
+                }
+            ],
+            "title": "Drop Reasons Over Time",
+            "type": "timeseries"
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 46
+            },
+            "id": 105,
+            "title": "📈 Real-time Traffic Breakdown",
+            "type": "row"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 10,
+                        "lineWidth": 2
+                    },
+                    "unit": "pps"
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 47
+            },
+            "id": 50,
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "calcs": [
+                        "mean",
+                        "max"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "rate(xdp_protocol_total[1m])",
+                    "legendFormat": "{{protocol}}"
+                }
+            ],
+            "title": "Protocol Rate (PPS)",
+            "type": "timeseries"
+        },
+        {
+            "datasource": {
+                "type": "prometheus"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 10,
+                        "lineWidth": 2
+                    },
+                    "unit": "pps"
+                }
+            },
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 47
+            },
+            "id": 51,
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "calcs": [
+                        "mean",
+                        "max"
+                    ]
+                }
+            },
+            "targets": [
+                {
+                    "expr": "rate(xdp_action_total[1m])",
+                    "legendFormat": "{{action}}"
+                }
+            ],
+            "title": "Action Rate (PPS)",
+            "type": "timeseries"
+        }
+    ],
+    "refresh": "5s",
+    "schemaVersion": 38,
+    "style": "dark",
+    "tags": [
+        "xdp",
+        "ddos",
+        "security",
+        "network",
+        "ebpf"
+    ],
+    "templating": {
+        "list": []
+    },
+    "time": {
+        "from": "now-15m",
+        "to": "now"
+    },
+    "timepicker": {},
+    "timezone": "",
+    "title": "XDP Anti-DDoS Dashboard (Enhanced)",
+    "uid": "xdp-anti-ddos-v2",
+    "version": 1
+}
