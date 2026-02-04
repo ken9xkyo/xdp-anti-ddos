@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XDP Anti-DDoS Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="container">
+            <a href="/" class="logo">XDP Anti-DDoS</a>
+            <div class="nav-links">
+                <a href="{{ url_for('index') }}" class="{{ 'active' if request.path == '/' else '' }}">Dashboard</a>
+                <a href="{{ url_for('whitelist') }}" class="{{ 'active' if request.path == '/whitelist' else '' }}">Whitelist</a>
+                <a href="{{ url_for('ports') }}" class="{{ 'active' if request.path == '/ports' else '' }}">Blocked Ports</a>
+                <a href="{{ url_for('config') }}" class="{{ 'active' if request.path == '/config' else '' }}">Configuration</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container main-content">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>XDP Anti-DDoS Management Interface</p>
+        </div>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XDP Anti-DDoS Manager</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <nav class="navbar">
+        <div class="container">
+            <a href="/" class="logo">XDP Anti-DDoS</a>
+            <div class="nav-links">
+                <a href="/" class="active">Dashboard</a>
+                <a href="/whitelist" class="">Whitelist</a>
+                <a href="/ports" class="">Blocked Ports</a>
+                <a href="/config" class="">Configuration</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container main-content">
+
+
+
+
+
+        <div class="header">
+            <h1>System Status</h1>
+            <a href="/" class="btn btn-secondary">Refresh</a>
+        </div>
+
+
+        <div class="alert alert-error">
+            <strong>Error:</strong> name &#39;sys&#39; is not defined
+            Traceback (most recent call last):
+            File &#34;/root/xdp-anti-ddos/web/xdp_wrapper.py&#34;, line 151, in get_stats
+            print(f&#34;DEBUG: stats is {type(stats)}: {stats}&#34;, file=sys.stderr)
+            ^^^
+            NameError: name &#39;sys&#39; is not defined. Did you forget to import &#39;sys&#39;
+
+            <p>Is the XDP program loaded via `test_xdp.sh`?</p>
+        </div>
+
+
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>XDP Anti-DDoS Management Interface</p>
+        </div>
+    </footer>
+</body>
+
+</html>

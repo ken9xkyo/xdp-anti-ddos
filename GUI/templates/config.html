@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="header">
+    <h1>System Configuration</h1>
+</div>
+
+<div class="card">
+    <form method="POST">
+        <div class="form-group">
+            <label>UDP PPS Limit (per Source IP)</label>
+            <input type="number" name="pps_limit" value="{{ config.pps_limit }}" required min="1">
+            <small>Max UDP packets per second allowed from a single IP.</small>
+        </div>
+
+        <div class="form-group">
+            <label>UDP Max Payload Size (bytes)</label>
+            <input type="number" name="max_size" value="{{ config.max_size }}" required min="0">
+            <small>Drop UDP packets larger than this size (prevents amplification attacks).</small>
+        </div>
+
+        <div class="form-group">
+            <label>ICMP PPS Limit (per Source IP)</label>
+            <input type="number" name="icmp_limit" value="{{ config.icmp_limit }}" required min="1">
+            <small>Max ICMP (Ping) packets per second allowed from a single IP.</small>
+        </div>
+
+        <!-- <div class="form-group">
+            <label>SYN PPS Limit (per Source IP)</label>
+            <input type="number" name="syn_limit" value="{{ config.syn_limit }}" required min="1">
+            <small>Max TCP SYN packets per second allowed from a single IP.</small>
+        </div> -->
+
+        <button type="submit" class="btn btn-primary">Update Configuration</button>
+    </form>
+</div>
+{% endblock %}

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="header">
+    <h1>Blocked Amplification Ports</h1>
+</div>
+
+<div class="card">
+    <h3>Block a Port</h3>
+    <form method="POST" class="inline-form">
+        <input type="hidden" name="action" value="add">
+        <input type="number" name="port" placeholder="Port (1-65535)" required min="1" max="65535">
+        <button type="submit" class="btn btn-primary">Block Port</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3>Currently Blocked Ports</h3>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Port Number</th>
+                <th>Service (Common)</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for port in ports %}
+            <tr>
+                <td>{{ port }}</td>
+                <td>
+                    {% if port == 53 %}DNS
+                    {% elif port == 123 %}NTP
+                    {% elif port == 1900 %}SSDP
+                    {% elif port == 11211 %}Memcached
+                    {% elif port == 19 %}Chargen
+                    {% elif port == 161 %}SNMP
+                    {% elif port == 389 %}LDAP
+                    {% else %}Unknown{% endif %}
+                </td>
+                <td>
+                    <form method="POST" style="display:inline;">
+                        <input type="hidden" name="action" value="remove">
+                        <input type="hidden" name="port" value="{{ port }}">
+                        <button type="submit" class="btn btn-danger btn-sm"
+                            onclick="return confirm('Unblock port {{ port }}?')">Unblock</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="3" class="text-center">No ports blocked</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

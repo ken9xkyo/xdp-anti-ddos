@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="header">
+    <h1>System Status</h1>
+    <a href="/" class="btn btn-secondary">Refresh</a>
+</div>
+
+{% if stats.error %}
+<div class="alert alert-error">
+    <strong>Error:</strong> {{ stats.error }}
+    <p>Is the XDP program loaded via `test_xdp.sh`?</p>
+</div>
+{% else %}
+<div class="stats-grid">
+    <div class="card stat-card passed">
+        <h3>Passed Traffic</h3>
+        <div class="value">{{ "{:,}".format(stats.packets_passed) }}</div>
+        <div class="unit">packets</div>
+        <div class="sub-value">{{ "{:.2f}".format(stats.bytes_passed / 1024 / 1024) }} MB</div>
+    </div>
+
+    <div class="card stat-card dropped">
+        <h3>Dropped Traffic</h3>
+        <div class="value">{{ "{:,}".format(stats.packets_dropped) }}</div>
+        <div class="unit">packets</div>
+        <div class="sub-value">{{ "{:.2f}".format(stats.bytes_dropped / 1024 / 1024) }} MB</div>
+    </div>
+
+    <div class="card stat-card rate">
+        <h3>Drop Rate</h3>
+        {% set total = stats.packets_passed + stats.packets_dropped %}
+        <div class="value">
+            {% if total > 0 %}
+            {{ "{:.2f}".format(stats.packets_dropped / total * 100) }}%
+            {% else %}
+            0.00%
+            {% endif %}
+        </div>
+        <div class="unit">percent</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Drop Reasons</h2>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Reason</th>
+                <th>Count</th>
+                <th>Percentage</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for reason, count in stats.drop_reasons.items() %}
+            {% if count > 0 %}
+            <tr>
+                <td>{{ reason }}</td>
+                <td>{{ "{:,}".format(count) }}</td>
+                <td>
+                    {% if stats.packets_dropped > 0 %}
+                    {{ "{:.1f}".format(count / stats.packets_dropped * 100) }}%
+                    {% else %}
+                    0%
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+            {% if stats.packets_dropped == 0 %}
+            <tr>
+                <td colspan="3" class="text-center">No dropped packets yet</td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

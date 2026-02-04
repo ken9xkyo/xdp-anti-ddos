@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="header">
+    <h1>Whitelist Management</h1>
+</div>
+
+<div class="card">
+    <h3>Add IP to Whitelist</h3>
+    <form method="POST" class="inline-form">
+        <input type="hidden" name="action" value="add">
+        <input type="text" name="ip" placeholder="IP Address (e.g. 192.168.1.10)" required
+            pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$">
+        <button type="submit" class="btn btn-primary">Add IP</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3>Whitelisted IPs</h3>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>IP Address</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ip in ips %}
+            <tr>
+                <td>{{ ip }}</td>
+                <td>
+                    <form method="POST" style="display:inline;">
+                        <input type="hidden" name="action" value="remove">
+                        <input type="hidden" name="ip" value="{{ ip }}">
+                        <button type="submit" class="btn btn-danger btn-sm"
+                            onclick="return confirm('Remove {{ ip }} from whitelist?')">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="2" class="text-center">No IPs in whitelist</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
