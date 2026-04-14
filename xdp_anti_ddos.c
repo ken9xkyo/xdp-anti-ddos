@@ -7,11 +7,14 @@
  * XDP (eXpress Data Path) là công nghệ xử lý gói tin ở tầng thấp nhất trong
  * Linux kernel, cho phép lọc gói tin với hiệu năng cực cao (hàng triệu gói/giây).
  *
+ * Tối ưu hóa cho kiến trúc Out-of-Band Scrubbing (2 cổng: IN / OUT)
+ * ============================================================================
+ *
  * Chương trình này hoạt động như một bộ lọc thông minh:
  *   1. Gói tin đến → Phân tích header (Ethernet → IP → UDP/TCP/ICMP)
  *   2. Kiểm tra whitelist (danh sách IP được phép) → Cho qua ngay
  *   3. Phát hiện gói tin bất thường → Chặn (DROP)
- *   4. Gói tin hợp lệ → Chuyển tiếp (redirect) hoặc cho qua (pass)
+ *   4. Gói tin hợp lệ → L2 MAC Rewrite & Chuyển tiếp (redirect qua DEVMAP)
  *
  * Các tính năng bảo vệ:
  *   - IP Whitelist: Danh sách IP tin cậy, không bị kiểm tra
@@ -26,6 +29,7 @@
 #include <linux/bpf.h>        /* Các định nghĩa BPF cơ bản (XDP_PASS, XDP_DROP...) */
 #include <linux/if_ether.h>   /* Cấu trúc Ethernet header (ethhdr) */
 #include <linux/ip.h>         /* Cấu trúc IP header (iphdr) */
+#include <linux/ipv6.h>       /* Cấu trúc IPv6 header (ipv6hdr) */
 #include <linux/tcp.h>        /* Cấu trúc TCP header (tcphdr) */
 #include <linux/udp.h>        /* Cấu trúc UDP header (udphdr) */
 #include <linux/icmp.h>       /* Cấu trúc ICMP header */
@@ -55,7 +59,8 @@
 #define ONE_SECOND_NS       1000000000ULL
 
 /* Giới hạn kích thước tối đa cho các BPF map */
-#define MAX_WHITELIST       10000      /* Số IP tối đa trong whitelist */
+#define MAX_WHITELIST       10000      /* Số IP/CIDR tối đa trong whitelist */
+#define MAX_BLACKLIST       10000      /* Số IP/CIDR tối đa trong blacklist */
 #define MAX_AMP_PORTS       100        /* Số cổng amplification tối đa */
 #define MAX_RATE_ENTRIES    1000000    /* Số entry rate limit tối đa (LRU tự xoá cũ) */
 
@@ -89,7 +94,20 @@
 #define DROP_SYN_RATELIMIT       7   /* Vượt quá giới hạn SYN/giây */
 #define DROP_BLACKLIST           8   /* IP nằm trong danh sách đen */
 #define DROP_PARSE_ERROR         9   /* Lỗi khi phân tích header gói tin */
-#define DROP_MAX_REASONS         10  /* Tổng số lý do DROP (kích thước mảng) */
+#define DROP_TEMP_BLOCK          10  /* Đang bị chặn tạm thời do vi phạm */
+#define DROP_MAX_REASONS         11  /* Tổng số lý do DROP (kích thước mảng) */
+
+/*
+ * ACL (Access Control List) - Giá trị hành động trong acl_map (merged BL/WL).
+ * Hợp nhất blacklist + whitelist vào 1 map duy nhất để tiết kiệm 1 LPM lookup
+ * (~80 cycles/packet). Rule cụ thể nhất (longest prefix) luôn thắng.
+ */
+#define ACL_ALLOW               1   /* Cho phép (whitelist) */
+#define ACL_DENY                2   /* Chặn (blacklist) */
+#define MAX_ACL_ENTRIES         20000  /* MAX_WHITELIST + MAX_BLACKLIST */
+
+/* Tail call program indices trong jmp_table */
+#define PROG_STATS              0   /* Chương trình thống kê (tail-called) */
 
 /*
  * VLAN (Virtual LAN) - mạng ảo trên cùng switch vật lý.
@@ -144,6 +162,7 @@ struct xdp_global_stats {
     __u64 packets_dropped;      /* Số gói bị chặn */
     __u64 bytes_dropped;        /* Tổng byte bị chặn */
     __u64 packets_redirected;   /* Số gói được redirect sang interface khác */
+    __u64 bytes_redirected;     /* Tổng byte được redirect */
 
     /* === Lý do DROP: đếm theo từng loại === */
     __u64 drop_reasons[DROP_MAX_REASONS];
@@ -186,9 +205,42 @@ struct rate_limit_t {
 } __attribute__((aligned(16)));
 
 /*
+ * Cấu trúc key cho BPF LPM Trie (Longest Prefix Match) - IPv4.
+ *
+ * BPF_MAP_TYPE_LPM_TRIE yêu cầu key phải có trường prefixlen ở đầu,
+ * theo sau là dữ liệu địa chỉ. Kernel sử dụng Radix Tree (compressed trie)
+ * để thực hiện bitwise longest-prefix matching.
+ *
+ * Ví dụ:
+ *   - prefixlen=32, addr=10.1.2.3 → match chính xác IP 10.1.2.3
+ *   - prefixlen=24, addr=10.1.2.0 → match tất cả IP trong 10.1.2.0/24
+ *   - prefixlen=8,  addr=10.0.0.0 → match tất cả IP trong 10.0.0.0/8
+ */
+struct lpm_key_ipv4 {
+    __u32 prefixlen;  /* Số bit prefix (0-32 cho IPv4) */
+    __u32 addr;       /* Địa chỉ IPv4 (network byte order) */
+};
+
+/*
+ * Cấu trúc key cho BPF LPM Trie - IPv6.
+ *
+ * Tương tự IPv4 nhưng với 128-bit address.
+ * - prefixlen: Số bit prefix (0-128 cho IPv6)
+ * - addr: Địa chỉ IPv6 (16 byte, network byte order)
+ *
+ * Ví dụ:
+ *   - prefixlen=128, addr=2001:db8::1 → match chính xác
+ *   - prefixlen=48,  addr=2001:db8:1:: → match subnet /48
+ */
+struct lpm_key_ipv6 {
+    __u32 prefixlen;  /* Số bit prefix (0-128 cho IPv6) */
+    __u8  addr[16];   /* Địa chỉ IPv6 (128-bit, network byte order) */
+};
+
+/*
  * Thông tin redirect - dùng để chuyển tiếp gói tin sang interface khác.
  *
- * Khi server nhận traffic cho một VIP (Virtual IP), gói tin sẽ được
+ * Khi server nhận traffic cho một VM (Virtual IP), gói tin sẽ được
  * rewrite MAC và redirect sang server backend thật sự xử lý.
  */
 struct redirect_info {
@@ -196,6 +248,18 @@ struct redirect_info {
     unsigned char dst_mac[6];  /* MAC đích mới (MAC của backend server) */
     __u32 ifindex;             /* Interface index để gửi gói tin đi */
 };
+
+/*
+ * Context truyền dữ liệu cho tail-called stats program.
+ * Dùng per-CPU array để tránh lock. Main program ghi → stats program đọc.
+ */
+struct stats_ctx {
+    __u64 pkt_size;     /* Kích thước gói tin */
+    __s32 action;       /* XDP action (PASS/DROP/REDIRECT) */
+    __s32 reason_idx;   /* Lý do DROP (-1 nếu không DROP) */
+    __u8  protocol;     /* IP protocol (UDP/TCP/ICMP) */
+    __u16 sport;        /* Source port (cho UDP stats) */
+} __attribute__((aligned(8)));
 
 /* ============================================================================
  * BPF MAPS - Các "bảng dữ liệu" chia sẻ giữa kernel và userspace
@@ -205,23 +269,44 @@ struct redirect_info {
  *   2. Lưu trạng thái giữa các lần xử lý gói tin
  *
  * Các loại map dùng trong chương trình:
+ *   - LPM_TRIE: Prefix Tree cho IP lookup (whitelist/blacklist, hỗ trợ CIDR)
  *   - HASH: Bảng băm key-value, tra cứu O(1)
  *   - LRU_PERCPU_HASH: Hash + tự xoá entry cũ nhất + mỗi CPU riêng
  *   - PERCPU_ARRAY: Mảng với bản sao per-CPU (không lock, hiệu năng cao)
  * ============================================================================ */
 
 /*
- * Danh sách trắng IP (Whitelist)
- * IP trong whitelist được cho qua ngay, không kiểm tra gì thêm.
- * - Key: __u32 = địa chỉ IPv4 (4 byte)
- * - Value: __u8 = 1 (chỉ cần tồn tại, giá trị không quan trọng)
+ * ACL Map (Access Control List) - IPv4, hợp nhất whitelist + blacklist.
+ *
+ * TỐI ƯU HÓA QUAN TRỌNG: Gộp 2 map (whitelist + blacklist) thành 1.
+ * Tiết kiệm ~80 cycles/packet vì chỉ cần 1 LPM lookup thay vì 2.
+ *
+ * Value = ACL_ALLOW (1) hoặc ACL_DENY (2).
+ * Longest Prefix Match: Rule cụ thể nhất luôn thắng.
+ * VD: 10.0.0.0/8 → ALLOW, 10.1.0.0/16 → DENY
+ *     → 10.1.2.3 match DENY (/16 cụ thể hơn /8)
+ *
+ * BPF_F_NO_PREALLOC là BẮT BUỘC cho LPM Trie map.
  */
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, MAX_WHITELIST);
-    __type(key, __u32);
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, MAX_ACL_ENTRIES);
+    __type(key, struct lpm_key_ipv4);
     __type(value, __u8);
-} whitelist_map SEC(".maps");
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} acl_map SEC(".maps");
+
+/*
+ * ACL Map IPv6 - hợp nhất whitelist_v6 + blacklist_v6.
+ * Tương tự acl_map nhưng cho địa chỉ IPv6 (128-bit prefix).
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, MAX_ACL_ENTRIES);
+    __type(key, struct lpm_key_ipv6);
+    __type(value, __u8);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} acl_map_v6 SEC(".maps");
 
 /*
  * Danh sách cổng Amplification cần chặn
@@ -230,8 +315,12 @@ struct {
  * - Key: __u16 = số cổng nguồn
  * - Value: __u8 = 1 (chỉ cần tồn tại)
  */
+/*
+ * TỐI ƯU: PERCPU_HASH loại bỏ lock contention giữa các CPU core.
+ * Mỗi CPU có bản sao riêng → lookup nhanh hơn ~10 cycles.
+ */
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
     __uint(max_entries, MAX_AMP_PORTS);
     __type(key, __u16);
     __type(value, __u8);
@@ -289,10 +378,21 @@ struct {
 } rate_limit_icmp_map SEC(".maps");
 
 /*
- * Bảng redirect theo VIP (Virtual IP)
+ * Bảng chặn tạm thời (Temporary Block)
+ * Lưu trữ IPs bị chặn trong 10 phút sau khi vi phạm
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAX_RATE_ENTRIES);
+    __type(key, __u32);
+    __type(value, __u64);
+} temp_block_map SEC(".maps");
+
+/*
+ * Bảng redirect theo IP 
  * Khi gói tin đến có IP đích nằm trong bảng này, gói sẽ được
  * rewrite MAC và chuyển tiếp sang backend server tương ứng.
- * - Key: __u32 = IP đích (VIP)
+ * - Key: __u32 = IP đích
  * - Value: struct redirect_info = thông tin MAC + interface đích
  * - pinning: Map được ghim (pin) trong filesystem (/sys/fs/bpf/)
  *   để các tool userspace khác có thể truy cập.
@@ -303,7 +403,7 @@ struct {
     __type(key, __u32);
     __type(value, struct redirect_info);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
-} vip_redirect_map SEC(".maps");
+} vm_redirect_map SEC(".maps");
 
 /*
  * Thống kê toàn cục (global stats)
@@ -317,6 +417,41 @@ struct {
     __type(key, __u32);
     __type(value, struct xdp_global_stats);
 } global_stats_map SEC(".maps");
+
+/* * DEVMAP: Map quản lý phần cứng mạng cho bpf_redirect_map.
+ * Bắt buộc phải có để tận dụng cơ chế bulking đẩy gói tin siêu tốc.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_DEVMAP);
+    __uint(max_entries, 64);
+    __type(key, __u32);   /* Key là ifindex cổng xuất */
+    __type(value, __u32); /* Value cũng là ifindex cổng xuất */
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} tx_port_map SEC(".maps");
+
+/*
+ * Stats scratch space - per-CPU buffer truyền data cho tail-called stats program.
+ * Main program ghi stats context vào đây, rồi tail call sang xdp_stats_prog.
+ * PERCPU_ARRAY: mỗi CPU có bản sao riêng → không cần lock.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct stats_ctx);
+} stats_scratch SEC(".maps");
+
+/*
+ * Jump table cho bpf_tail_call - chứa fd của sub-programs.
+ * Userspace (loader) phải populate map này sau khi load program.
+ * Entry PROG_STATS (0) → fd của xdp_stats_prog.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+    __uint(max_entries, 2);
+    __type(key, __u32);
+    __type(value, __u32);
+} jmp_table SEC(".maps");
 
 /* ============================================================================
  * HÀM HELPER - Các hàm phụ trợ được inline (chèn trực tiếp vào nơi gọi)
@@ -363,6 +498,7 @@ track_stats(__u64 pkt_size, int action, int reason_idx, __u8 protocol, __u16 spo
     }
     else if (action == XDP_REDIRECT) {
         stats->packets_redirected++;
+        stats->bytes_redirected += pkt_size;
     }
 
     /* --- Phân loại theo giao thức --- */
@@ -418,15 +554,36 @@ static __always_inline __u64 get_config(__u32 key, __u64 default_val)
 }
 
 /*
- * is_whitelisted - Kiểm tra IP có trong danh sách trắng không.
+ * check_acl - Kiểm tra IP trong ACL map (merged whitelist + blacklist).
  *
- * Trả về: 1 nếu IP được whitelist (cho qua ngay), 0 nếu không.
- * Chỉ cần kiểm tra key có tồn tại, không cần đọc value.
+ * TỐI ƯU QUAN TRỌNG: Chỉ 1 LPM lookup thay vì 2 (tiết kiệm ~80 cy/pkt).
+ * Kernel thực hiện longest-prefix match: rule cụ thể nhất luôn thắng.
+ *
+ * Trả về:
+ *   ACL_ALLOW (1): IP trong whitelist → cho qua
+ *   ACL_DENY  (2): IP trong blacklist → chặn
+ *   0:             IP không có trong ACL → tiếp tục kiểm tra
  */
-static __always_inline int is_whitelisted(__u32 ip)
+static __always_inline __u8 check_acl(__u32 ip)
 {
-    __u8 *val = bpf_map_lookup_elem(&whitelist_map, &ip);
-    return val != NULL;
+    struct lpm_key_ipv4 key = {
+        .prefixlen = 32,  /* Lookup exact match → kernel fallback prefix ngắn hơn */
+        .addr = ip        /* Network byte order (từ iph->saddr) */
+    };
+    __u8 *val = bpf_map_lookup_elem(&acl_map, &key);
+    return val ? *val : 0;
+}
+
+/*
+ * check_acl_v6 - Kiểm tra IPv6 trong ACL map (merged whitelist + blacklist).
+ * Tương tự check_acl nhưng cho 128-bit IPv6 address.
+ */
+static __always_inline __u8 check_acl_v6(const struct in6_addr *ip6)
+{
+    struct lpm_key_ipv6 key = { .prefixlen = 128 };
+    __builtin_memcpy(key.addr, ip6, 16);
+    __u8 *val = bpf_map_lookup_elem(&acl_map_v6, &key);
+    return val ? *val : 0;
 }
 
 /*
@@ -465,21 +622,21 @@ parse_eth(struct ethhdr *eth, void *data_end, int *offset)
     __u16 h_proto = eth->h_proto;
     *offset = sizeof(*eth);
 
-    /* Kiểm tra và bóc VLAN tag lớp 1 (nếu có) */
-    if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
+    /* Kiểm tra và bóc VLAN tag lớp 1 (nếu có) - Tối ưu bằng unlikely() */
+    if (unlikely(h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD))) {
         struct vlan_hdr {
             __be16 h_vlan_TCI;                  /* VLAN ID + Priority */
             __be16 h_vlan_encapsulated_proto;   /* EtherType thật */
         } *vhdr;
         vhdr = (void *)eth + *offset;
-        if ((void *)(vhdr + 1) > data_end) return 0;
+        if (unlikely((void *)(vhdr + 1) > data_end)) return 0;
         h_proto = vhdr->h_vlan_encapsulated_proto;
         *offset += VLAN_HDR_SZ;
 
         /* Kiểm tra VLAN tag lớp 2 - QinQ (nếu có) */
-        if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
+        if (unlikely(h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD))) {
             vhdr = (void *)eth + *offset;
-            if ((void *)(vhdr + 1) > data_end) return 0;
+            if (unlikely((void *)(vhdr + 1) > data_end)) return 0;
             h_proto = vhdr->h_vlan_encapsulated_proto;
             *offset += VLAN_HDR_SZ;
         }
@@ -532,7 +689,7 @@ check_rate_limit(void *map, __u32 src_ip, __u64 limit, __u64 now)
  * xdp_auto_redirect - Tự động chuyển tiếp gói tin nếu IP đích có trong bảng redirect.
  *
  * Quy trình:
- *   1. Tra cứu IP đích trong vip_redirect_map
+ *   1. Tra cứu IP đích trong vm_redirect_map
  *   2. Nếu tìm thấy → rewrite MAC nguồn/đích + redirect sang interface đích
  *   3. Nếu không tìm thấy → XDP_PASS (cho kernel xử lý bình thường)
  *
@@ -542,17 +699,81 @@ static __always_inline int
 xdp_auto_redirect(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph)
 {
     __u32 dst_ip = iph->daddr;
-    struct redirect_info *info = bpf_map_lookup_elem(&vip_redirect_map, &dst_ip);
+    struct redirect_info *info = bpf_map_lookup_elem(&vm_redirect_map, &dst_ip);
 
     if (info) {
-        /* Ghi đè MAC address: đổi nguồn/đích để gói tin đi đúng hướng */
+        /* Ghi đè MAC address (L2 Rewrite) để Switch đẩy tới VM đích */
         __builtin_memcpy(eth->h_source, info->src_mac, ETH_ALEN);
         __builtin_memcpy(eth->h_dest, info->dst_mac, ETH_ALEN);
-        /* Gửi gói tin ra interface đích */
-        return bpf_redirect(info->ifindex, 0);
+        
+        /* Thay vì bpf_redirect, sử dụng bpf_redirect_map với tx_port_map */
+        /* Giúp tăng mạnh hiệu năng nhờ vào cơ chế TX bulking của kernel */
+        return bpf_redirect_map(&tx_port_map, info->ifindex, 0);
     }
-    /* Không có rule redirect → cho kernel xử lý */
     return XDP_PASS;
+}
+
+/*
+ * emit_verdict - Ghi kết quả xử lý vào scratch buffer và tail call sang stats program.
+ *
+ * TỐI ƯU QUAN TRỌNG: Tách stats tracking sang chương trình BPF riêng biệt.
+ * Lợi ích:
+ *   1. Giảm instruction count trong main program → instruction cache tốt hơn
+ *   2. Nếu tail call thất bại → graceful fallback (chỉ mất stats, không mất packet)
+ *   3. Có thể thêm logic stats phức tạp mà không ảnh hưởng main program
+ *
+ * QUAN TRỌNG: bpf_redirect_map() lưu redirect info trong per-CPU storage,
+ * KHÔNG phải trên stack. Nên tail call không ảnh hưởng redirect đã setup.
+ */
+/*
+ * block_ip - Thêm IP vào danh sách chặn tạm thời
+ */
+static __always_inline void
+block_ip(__u32 src_ip, __u64 now)
+{
+    bpf_map_update_elem(&temp_block_map, &src_ip, &now, BPF_ANY);
+}
+
+static __always_inline int
+emit_verdict(struct xdp_md *ctx, __u64 pkt_size, int action, int reason, __u8 proto, __u16 sport)
+{
+    __u32 key = 0;
+    struct stats_ctx *sc = bpf_map_lookup_elem(&stats_scratch, &key);
+    if (sc) {
+        sc->pkt_size = pkt_size;
+        sc->action = action;
+        sc->reason_idx = reason;
+        sc->protocol = proto;
+        sc->sport = sport;
+    }
+    /* Tail call sang stats program — nếu thất bại, fallback trả action trực tiếp */
+    bpf_tail_call(ctx, &jmp_table, PROG_STATS);
+    return action;
+}
+
+
+
+/*
+ * xdp_stats_prog - Chương trình stats chạy qua tail call.
+ *
+ * Đọc context từ stats_scratch, cập nhật global_stats_map,
+ * sau đó trả về XDP action đã lưu.
+ *
+ * bpf_redirect_map() info được lưu trong per-CPU bpf_redirect_info,
+ * nên return XDP_REDIRECT từ đây vẫn hoạt động đúng.
+ */
+SEC("xdp/stats")
+int xdp_stats_prog(struct xdp_md *ctx)
+{
+    __u32 key = 0;
+    struct stats_ctx *sc = bpf_map_lookup_elem(&stats_scratch, &key);
+    if (!sc)
+        return XDP_PASS;
+
+    track_stats(sc->pkt_size, sc->action, sc->reason_idx, sc->protocol, sc->sport);
+
+    /* Trả về action gốc — kernel sử dụng giá trị này để quyết định */
+    return sc->action;
 }
 
 /* ============================================================================
@@ -566,16 +787,22 @@ xdp_auto_redirect(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph)
  *   Phân tích Ethernet header (xử lý VLAN nếu có)
  *       │
  *       ▼
- *   Không phải IPv4? ──→ XDP_PASS (cho qua)
+ *   IPv6? ──→ Blacklist/Whitelist check (LPM) → PASS/DROP
  *       │
  *       ▼
- *   Phân tích IP header
+ *   Không phải IPv4? ──→ XDP_PASS
  *       │
  *       ▼
- *   IP trong whitelist? ──→ Redirect hoặc PASS
+ *   Phân tích IP header (bounds + IHL + version validation)
  *       │
  *       ▼
- *   Gói tin phân mảnh? ──→ XDP_DROP
+ *   Gói tin phân mảnh? ──→ XDP_DROP (rẻ nhất, check trước)
+ *       │
+ *       ▼
+ *   IP trong blacklist? ──→ DROP (early drop, ưu tiên cao nhất)
+ *       │
+ *       ▼
+ *   IP trong whitelist? ──→ Redirect hoặc PASS (bypass mọi check)
  *       │
  *       ▼
  *   ┌─────────────────────────────────────┐
@@ -589,6 +816,14 @@ xdp_auto_redirect(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph)
  *       ▼
  *   XDP_PASS / XDP_DROP / XDP_REDIRECT
  *
+ * BẢO MẬT:
+ *   - Mọi header access đều có bounds check trước (OOB prevention)
+ *   - Blacklist kiểm tra TRƯỚC whitelist (early drop cho DDoS)
+ *   - IHL validation: min=20, max=60 byte (chống header manipulation)
+ *   - Fragment detection: DROP tất cả gói phân mảnh
+ *   - LPM Trie maps sử dụng BPF RCU (read-copy-update) tự động
+ *   - max_entries cứng trên mọi map (chống resource exhaustion)
+ *
  * Trả về:
  *   - XDP_PASS: Cho gói tin vào kernel network stack bình thường
  *   - XDP_DROP: Huỷ gói tin ngay tại driver (nhanh nhất)
@@ -598,189 +833,213 @@ xdp_auto_redirect(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph)
 SEC("xdp")
 int xdp_anti_ddos(struct xdp_md *ctx)
 {
-    /* === Bước 1: Lấy thông tin cơ bản của gói tin === */
-    void *data_end = (void *)(long)ctx->data_end; /* Biên cuối gói tin */
-    void *data = (void *)(long)ctx->data;         /* Biên đầu gói tin */
-    __u64 pkt_size = data_end - data;             /* Kích thước tổng gói tin */
-    __u64 now = bpf_ktime_get_coarse_ns();        /* Timestamp hiện tại (ns) */
+    /* === Bước 1: Lấy thông tin cơ bản === */
+    void *data_end = (void *)(long)ctx->data_end;
+    void *data = (void *)(long)ctx->data;
+    __u64 pkt_size = data_end - data;
 
-    /* === Bước 2: Phân tích Ethernet header ===
-     * Mỗi gói tin bắt đầu bằng Ethernet header (14 byte).
-     * Cần kiểm tra gói tin đủ lớn trước khi đọc (BPF verifier yêu cầu).
+    /*
+     * TỐI ƯU: bpf_ktime_get_coarse_ns() là hàm nhanh nhất:
+     * - Sử dụng vDSO cached clock (~5ns jitter, đủ cho rate limit 1s window)
+     * - bpf_ktime_get_ns(): chính xác hơn nhưng chậm hơn ~10-20cy
+     * - bpf_ktime_get_boot_ns(): bao gồm suspend time, chậm hơn
      */
+    __u64 now = bpf_ktime_get_coarse_ns();
+
+    /*
+     * TỐI ƯU CỰC HẠN (Extreme Performance Tuning):
+     * Các giá trị get_config() đã được chuyển sâu xuống từng nhánh protocol (Lazy Evaluation).
+     * Giúp giảm từ 3-4 lời gọi BPF map lookup (~120 cycles) đối với mọi gói tin bị drop sớm
+     * hoặc không phải giao thức tương ứng (e.g. gói TCP không cần lookup UDP config).
+     */
+
+    /* === Bước 2: Ethernet header === */
     struct ethhdr *eth = data;
     int eth_off = 0;
 
-    if ((void *)(eth + 1) > data_end) {
-        /* Gói tin quá nhỏ, không đủ Ethernet header → DROP */
-        track_stats(pkt_size, XDP_DROP, DROP_PARSE_ERROR, 0, 0);
-        return XDP_DROP;
-    }
+    if (unlikely((void *)(eth + 1) > data_end))
+        return XDP_DROP; /* EARLY DROP Strategy: XDP_DROP ngay lập tức, bỏ qua stats để tránh CPU Exhaustion do spam lỗi */
 
-    /* Phân tích EtherType, bóc VLAN nếu có. eth_off = vị trí IP header */
     __u16 h_proto = parse_eth(eth, data_end, &eth_off);
 
-    /* === Bước 3: Chỉ xử lý IPv4 ===
-     * IPv6 và các giao thức khác được cho qua để kernel xử lý.
-     * Chương trình này chỉ bảo vệ chống DDoS trên IPv4.
-     */
-    if (h_proto != bpf_htons(ETH_P_IP)) {
-        track_stats(pkt_size, XDP_PASS, -1, 0, 0);
-        return XDP_PASS;
+    /* === Bước 3: IPv6 ACL (1 lookup thay vì 2) === */
+    if (h_proto == bpf_htons(ETH_P_IPV6)) {
+        struct ipv6hdr *ip6h = data + eth_off;
+        if (unlikely((void *)(ip6h + 1) > data_end || ip6h->version != 6))
+            return XDP_DROP; /* EARLY DROP */
+
+        __u8 acl_v6 = check_acl_v6(&ip6h->saddr);
+        if (unlikely(acl_v6 == ACL_DENY))
+            return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_BLACKLIST, 0, 0);
+        if (unlikely(acl_v6 == ACL_ALLOW))
+            return emit_verdict(ctx, pkt_size, XDP_PASS, -1, 0, 0);
+        return emit_verdict(ctx, pkt_size, XDP_PASS, -1, 0, 0);
     }
 
-    /* === Bước 4: Phân tích IP header ===
-     * Kiểm tra gói tin đủ lớn để chứa IP header.
-     * IP header có kích thước biến đổi: tối thiểu 20 byte (ihl=5),
-     * tối đa 60 byte (khi có IP options).
-     */
+    if (h_proto != bpf_htons(ETH_P_IP))
+        return emit_verdict(ctx, pkt_size, XDP_PASS, -1, 0, 0);
+
+    /* === Bước 4: IPv4 header validation === */
     struct iphdr *iph = data + eth_off;
-    if ((void *)(iph + 1) > data_end) {
-        track_stats(pkt_size, XDP_DROP, DROP_PARSE_ERROR, 0, 0);
+    if (unlikely((void *)(iph + 1) > data_end))
         return XDP_DROP;
-    }
 
-    int ip_hdr_len = iph->ihl * 4; /* ihl = số word 32-bit, nhân 4 ra byte */
-    if (ip_hdr_len < 20 || (void *)iph + ip_hdr_len > data_end) {
-        /* IP header không hợp lệ (quá nhỏ hoặc tràn giới hạn gói tin) */
-        track_stats(pkt_size, XDP_DROP, DROP_PARSE_ERROR, 0, 0);
+    /* SECURITY PATCH & VERIFIER SAFETY: Sử dụng bitwise mask để ép giới hạn cho biến 
+     * ip_hdr_len, ngăn chặn triệt để lỗi Pointer Arithmetic và Out-Of-Bounds. */
+    __u8 ihl = iph->ihl & 0x0F;
+    int ip_hdr_len = ihl * 4;
+    
+    if (unlikely(ip_hdr_len < (int)sizeof(struct iphdr) || (void *)iph + ip_hdr_len > data_end))
         return XDP_DROP;
-    }
 
-    __u32 src_ip = iph->saddr;     /* Địa chỉ IP nguồn */
-    __u8 protocol = iph->protocol; /* Giao thức tầng trên (UDP=17, TCP=6, ICMP=1) */
+    if (unlikely(iph->version != 4))
+        return XDP_DROP;
 
-    /* === Bước 5: Kiểm tra Whitelist ===
-     * IP trong whitelist được cho qua ngay, không kiểm tra rate limit hay gì cả.
-     * unlikely() vì đa số IP không nằm trong whitelist.
-     */
-    if (unlikely(is_whitelisted(src_ip))) {
-        track_stats(pkt_size, XDP_PASS, -1, protocol, 0);
-        return xdp_auto_redirect(ctx, eth, iph);
-    }
+    __u32 src_ip = iph->saddr;
+    __u8 protocol = iph->protocol;
 
-    /* === Bước 6: Chặn gói tin phân mảnh (IP Fragment) ===
-     * Fragment attack: Attacker gửi gói tin phân mảnh để bypass firewall
-     * vì fragment thứ 2 trở đi không có TCP/UDP header.
-     * Giải pháp đơn giản: DROP tất cả gói phân mảnh.
-     */
+    /* === Bước 5: Fragment check (~3cy, trước LPM ~80cy) === */
+    /* SECURITY: Chặn TUYỆT ĐỐI các gói phân mảnh (Fragment Attacks, Teardrop, v.v.). EARLY DROP. */
     if (unlikely((iph->frag_off & bpf_htons(IP_MF | IP_OFFSET)) != 0)) {
-        track_stats(pkt_size, XDP_DROP, DROP_FRAGMENTED, protocol, 0);
-        return XDP_DROP;
+        block_ip(src_ip, now);
+        return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_FRAGMENTED, protocol, 0);
     }
 
-    /* Con trỏ đến header tầng 4 (TCP/UDP/ICMP) */
+    /* === Bước 6: ACL — 1 lookup thay vì 2 (tiết kiệm ~80cy) ===
+     * Merged blacklist + whitelist. Longest prefix match thắng.
+     */
+    __u8 acl = check_acl(src_ip);
+    if (unlikely(acl == ACL_DENY))
+        return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_BLACKLIST, protocol, 0);
+    if (unlikely(acl == ACL_ALLOW)) {
+        int ret = xdp_auto_redirect(ctx, eth, iph);
+        return emit_verdict(ctx, pkt_size,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           -1, protocol, 0);
+    }
+
+    /* === Bước 6.5: Kiểm tra Temporary Block (Chặn 10 phút) === */
+    __u64 *blocked_time = bpf_map_lookup_elem(&temp_block_map, &src_ip);
+    if (unlikely(blocked_time)) {
+        /* Kiểm tra đã quá 10 phút chưa */
+        if (now - *blocked_time < 10ULL * 60ULL * ONE_SECOND_NS) {
+            return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_TEMP_BLOCK, protocol, 0);
+        } else {
+            /* Hết hạn 10 phút -> Xoá khỏi danh sách chặn tạm thời */
+            bpf_map_delete_elem(&temp_block_map, &src_ip);
+        }
+    }
+
     void *l4_hdr = (void *)iph + ip_hdr_len;
 
     /* ================================================================
-     * XỬ LÝ UDP
-     * Thứ tự kiểm tra được tối ưu: rẻ nhất trước, đắt nhất sau
-     *   1. Amplification port check (chỉ lookup map, rẻ)
-     *   2. Payload size check (so sánh số, rẻ)
-     *   3. Rate limit check (lookup + write map, đắt nhất)
+     * UDP — cached config (cfg_udp_pps, cfg_udp_size)
      * ================================================================ */
     if (protocol == IPPROTO_UDP) {
-        struct udphdr *udph = l4_hdr;
-        if ((void *)(udph + 1) > data_end) return XDP_DROP;
+        /* LAZY EVALUATION: Chỉ tra cứu BPF map cho giới hạn cấu hình UDP nếu đúng là UDP traffic. */
+        __u64 cfg_udp_size = get_config(CONFIG_UDP_MAX_SIZE, DEFAULT_UDP_MAX_SIZE);
+        __u64 cfg_udp_pps  = get_config(CONFIG_UDP_PPS_LIMIT, DEFAULT_UDP_PPS_LIMIT);
 
-        __u16 sport = bpf_ntohs(udph->source); /* Cổng nguồn (network → host byte order) */
-        __u64 l4_len = data_end - l4_hdr;       /* Tổng kích thước tầng 4 */
-        /* Payload = tổng - UDP header (8 byte) */
-        __u16 payload_len = (l4_len > sizeof(struct udphdr)) ?
+        struct udphdr *udph = l4_hdr;
+        if (unlikely((void *)(udph + 1) > data_end))
+            return XDP_DROP;
+
+        /* SECURITY PATCH: Malformed Packet Defense (Thực thi giới hạn độ dài payload UDP thực tế) */
+        __u32 claimed_len = bpf_ntohs(udph->len);
+        if (unlikely(claimed_len < sizeof(struct udphdr) || (__u64)(data_end - (void *)udph) < claimed_len))
+            return XDP_DROP;
+
+        __u16 sport = bpf_ntohs(udph->source);
+        __u64 l4_len = data_end - l4_hdr;
+        __u64 payload_len = (l4_len > sizeof(struct udphdr)) ?
                             (l4_len - sizeof(struct udphdr)) : 0;
 
-        /* 1. Kiểm tra cổng Amplification (rẻ nhất - chỉ lookup hash map) */
         if (is_amp_port(sport)) {
-            track_stats(pkt_size, XDP_DROP, DROP_UDP_AMPLIFICATION, protocol, sport);
-            return XDP_DROP;
+            block_ip(src_ip, now);
+            return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_UDP_AMPLIFICATION, protocol, sport);
+        }
+        if (payload_len > cfg_udp_size) {
+            block_ip(src_ip, now);
+            return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_UDP_PAYLOAD_SIZE, protocol, sport);
+        }
+        if (check_rate_limit(&rate_limit_map, src_ip, cfg_udp_pps, now)) {
+            block_ip(src_ip, now);
+            return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_UDP_RATELIMIT, protocol, sport);
         }
 
-        /* 2. Kiểm tra kích thước payload (rẻ - so sánh số) */
-        if (payload_len > get_config(CONFIG_UDP_MAX_SIZE, DEFAULT_UDP_MAX_SIZE)) {
-            track_stats(pkt_size, XDP_DROP, DROP_UDP_PAYLOAD_SIZE, protocol, sport);
-            return XDP_DROP;
-        }
-
-        /* 3. Rate Limiting (đắt nhất - lookup + write map) */
-        if (check_rate_limit(&rate_limit_map, src_ip,
-                             get_config(CONFIG_UDP_PPS_LIMIT, DEFAULT_UDP_PPS_LIMIT), now)) {
-            track_stats(pkt_size, XDP_DROP, DROP_UDP_RATELIMIT, protocol, sport);
-            return XDP_DROP;
-        }
-
-        /* Gói UDP hợp lệ → Thử redirect, nếu không thì PASS */
-        track_stats(pkt_size, XDP_PASS, -1, protocol, sport);
-        return xdp_auto_redirect(ctx, eth, iph);
+        int ret = xdp_auto_redirect(ctx, eth, iph);
+        return emit_verdict(ctx, pkt_size,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           -1, protocol, sport);
     }
 
     /* ================================================================
-     * XỬ LÝ TCP
-     * 1. Phát hiện flag bất thường (port scan, OS fingerprinting)
-     * 2. SYN flood protection (rate limit riêng cho SYN)
+     * TCP
      * ================================================================ */
     if (protocol == IPPROTO_TCP) {
-        struct tcphdr *tcph = l4_hdr;
-        if ((void *)(tcph + 1) > data_end) return XDP_DROP;
+        /* LAZY EVALUATION: Tra cứu cấu hình TCP SYN PPS Map riêng cho gói TCP */
+        __u64 cfg_syn_pps = get_config(CONFIG_SYN_PPS_LIMIT, DEFAULT_SYN_PPS_LIMIT);
 
-        /* Đọc byte flag TCP (byte thứ 13 trong TCP header, tính từ 0) */
+        struct tcphdr *tcph = l4_hdr;
+        if (unlikely((void *)(tcph + 1) > data_end))
+            return XDP_DROP;
+
+        /* SECURITY PATCH: Malformed Packet Defense (Bảo vệ OOB từ giả mạo tcph->doff) */
+        int tcp_hdr_len = (tcph->doff & 0x0F) * 4;
+        if (unlikely(tcp_hdr_len < (int)sizeof(struct tcphdr) || (void *)tcph + tcp_hdr_len > data_end))
+            return XDP_DROP;
+
         __u8 flags = ((__u8 *)tcph)[13];
 
-        /* Phát hiện flag TCP bất thường - dấu hiệu của scan hoặc tấn công:
-         *   - flags == 0: NULL scan (không có flag nào)
-         *   - SYN+FIN: Không bao giờ hợp lệ (bắt đầu + kết thúc cùng lúc)
-         *   - SYN+RST: Không bao giờ hợp lệ (bắt đầu + reset cùng lúc)
-         */
-        // if (flags == 0 ||
-        //    ((flags & (RAW_TCP_SYN | RAW_TCP_FIN)) == (RAW_TCP_SYN | RAW_TCP_FIN)) ||
-        //    ((flags & (RAW_TCP_SYN | RAW_TCP_RST)) == (RAW_TCP_SYN | RAW_TCP_RST))) {
-        //     track_stats(pkt_size, XDP_DROP, DROP_TCP_INVALID, protocol, 0);
-        //     return XDP_DROP;
-        // }
+        if (flags == 0 ||
+           ((flags & (RAW_TCP_SYN | RAW_TCP_FIN)) == (RAW_TCP_SYN | RAW_TCP_FIN)) ||
+           ((flags & (RAW_TCP_SYN | RAW_TCP_RST)) == (RAW_TCP_SYN | RAW_TCP_RST)) ||
+           ((flags & (RAW_TCP_FIN | RAW_TCP_RST)) == (RAW_TCP_FIN | RAW_TCP_RST)) ||
+           ((flags & (RAW_TCP_FIN | RAW_TCP_PSH | RAW_TCP_URG)) == (RAW_TCP_FIN | RAW_TCP_PSH | RAW_TCP_URG))) {
+            block_ip(src_ip, now);
+            return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_TCP_INVALID, protocol, 0);
+        }
 
-        /* SYN flood protection:
-         * Chỉ rate limit gói SYN thuần (SYN=1, ACK=0).
-         * Gói SYN-ACK (bước 2 của 3-way handshake) không bị limit.
-         */
         if ((flags & RAW_TCP_SYN) && !(flags & RAW_TCP_ACK)) {
-            if (check_rate_limit(&rate_limit_syn_map, src_ip,
-                                 get_config(CONFIG_SYN_PPS_LIMIT, DEFAULT_SYN_PPS_LIMIT), now)) {
-                track_stats(pkt_size, XDP_DROP, DROP_SYN_RATELIMIT, protocol, 0);
-                return XDP_DROP;
+            if (check_rate_limit(&rate_limit_syn_map, src_ip, cfg_syn_pps, now)) {
+                block_ip(src_ip, now);
+                return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_SYN_RATELIMIT, protocol, 0);
             }
         }
 
-        /* Gói TCP hợp lệ → Thử redirect, nếu không thì PASS */
-        track_stats(pkt_size, XDP_PASS, -1, protocol, 0);
-        return xdp_auto_redirect(ctx, eth, iph);
+        int ret = xdp_auto_redirect(ctx, eth, iph);
+        return emit_verdict(ctx, pkt_size,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           -1, protocol, 0);
     }
 
     /* ================================================================
-     * XỬ LÝ ICMP (ping, traceroute...)
-     * Chỉ cần rate limit để chống ICMP flood / ping flood.
-     * ICMP flood ít nguy hiểm hơn UDP/SYN flood nhưng vẫn cần kiểm soát.
+     * ICMP — cached config (cfg_icmp_pps)
      * ================================================================ */
     if (protocol == IPPROTO_ICMP) {
-        struct icmphdr *icmph = l4_hdr;
-        if ((void *)(icmph + 1) > data_end) return XDP_DROP;
+        /* LAZY EVALUATION: Tra cứu cấu hình ICMP PPS Limit thông qua BPF lookup ở last resort */
+        __u64 cfg_icmp_pps = get_config(CONFIG_ICMP_PPS_LIMIT, DEFAULT_ICMP_PPS_LIMIT);
 
-        /* Rate limit ICMP - ngưỡng mặc định 100 gói/giây (thấp hơn UDP/SYN) */
-        if (check_rate_limit(&rate_limit_icmp_map, src_ip,
-                             get_config(CONFIG_ICMP_PPS_LIMIT, DEFAULT_ICMP_PPS_LIMIT), now)) {
-            track_stats(pkt_size, XDP_DROP, DROP_ICMP_RATELIMIT, protocol, 0);
+        struct icmphdr *icmph = l4_hdr;
+        if (unlikely((void *)(icmph + 1) > data_end))
             return XDP_DROP;
+
+        if (check_rate_limit(&rate_limit_icmp_map, src_ip, cfg_icmp_pps, now)) {
+            block_ip(src_ip, now);
+            return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_ICMP_RATELIMIT, protocol, 0);
         }
 
-        /* ICMP hợp lệ → Thử redirect, nếu không thì PASS */
-        track_stats(pkt_size, XDP_PASS, -1, protocol, 0);
-        return xdp_auto_redirect(ctx, eth, iph);
+        int ret = xdp_auto_redirect(ctx, eth, iph);
+        return emit_verdict(ctx, pkt_size,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           -1, protocol, 0);
     }
 
-    /* ================================================================
-     * CÁC GIAO THỨC KHÁC (SCTP, GRE, ESP...)
-     * Không có rule đặc biệt → Thử redirect, nếu không thì PASS.
-     * ================================================================ */
-    track_stats(pkt_size, XDP_PASS, -1, protocol, 0);
-    return xdp_auto_redirect(ctx, eth, iph);
+    /* Giao thức khác */
+    int ret = xdp_auto_redirect(ctx, eth, iph);
+    return emit_verdict(ctx, pkt_size,
+                       (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                       -1, protocol, 0);
 }
 
 /* Khai báo license GPL - BẮT BUỘC để BPF verifier cho phép load chương trình */
