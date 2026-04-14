@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
 XDP Anti-DDoS CLI Tool
-Manage whitelist, ports, configuration, and statistics via BPF maps.
+Manage whitelist, blacklist, ports, configuration, and statistics via BPF maps.
+
+Supports CIDR notation for IP ranges (e.g. 10.0.0.0/8, 192.168.1.0/24).
+Bare IPs without prefix are automatically treated as /32 (IPv4) or /128 (IPv6).
 
 Usage:
-    xdp_cli.py whitelist add <IP>        # Add IP to whitelist
-    xdp_cli.py whitelist remove <IP>     # Remove IP from whitelist
-    xdp_cli.py whitelist list            # List whitelisted IPs
+    xdp_cli.py whitelist add <IP/CIDR>   # Add IP or CIDR range to whitelist
+    xdp_cli.py whitelist remove <IP/CIDR># Remove IP/CIDR from whitelist
+    xdp_cli.py whitelist list            # List whitelisted IPs/CIDRs
+
+    xdp_cli.py blacklist add <IP/CIDR>   # Add IP or CIDR range to blacklist
+    xdp_cli.py blacklist remove <IP/CIDR># Remove IP/CIDR from blacklist
+    xdp_cli.py blacklist list            # List blacklisted IPs/CIDRs
     
     xdp_cli.py port add <PORT>           # Add amplification port to block
     xdp_cli.py port remove <PORT>        # Remove port from block list
@@ -30,6 +37,9 @@ import sys
 import socket
 import struct
 import argparse
+import os
+import ctypes
+import ipaddress
 
 # Config map indices (must match xdp_anti_ddos.c)
 CONFIG_UDP_PPS_LIMIT = 0
@@ -57,7 +67,8 @@ DROP_REASONS = {
     6: "ICMP Rate Limit",
     7: "SYN Rate Limit",
     8: "Blacklisted IP",
-    9: "Parse Error"
+    9: "Parse Error",
+    10: "Temp Block"
 }
 
 class Colors:
@@ -80,26 +91,34 @@ def run_bpftool(args, check=True):
         return None, str(e)
 
 def get_active_xdp_map_ids():
-    """Get map IDs from the currently active XDP program"""
+    """Get map IDs from the currently active (attached) XDP program.
+    When multiple XDP programs are loaded, picks the one with highest ID
+    (most recently loaded = currently attached)."""
     output, err = run_bpftool(['prog', 'show', '-j'])
     if err:
         return []
     try:
         progs = json.loads(output)
-        # Find XDP programs
-        for prog in progs:
-            if prog.get('type') == 'xdp' and 'xdp_anti_ddos' in prog.get('name', ''):
-                return prog.get('map_ids', [])
-        # Fallback: any XDP program
-        for prog in progs:
-            if prog.get('type') == 'xdp':
-                return prog.get('map_ids', [])
+        # Find all XDP programs named xdp_anti_ddos, pick the last one (highest id)
+        xdp_progs = [p for p in progs
+                     if p.get('type') == 'xdp' and 'xdp_anti_ddos' in p.get('name', '')]
+        if xdp_progs:
+            # Sort by id descending, return the newest (attached) one
+            xdp_progs.sort(key=lambda p: p.get('id', 0), reverse=True)
+            return xdp_progs[0].get('map_ids', [])
+        # Fallback: any XDP program (pick the newest)
+        xdp_any = [p for p in progs if p.get('type') == 'xdp']
+        if xdp_any:
+            xdp_any.sort(key=lambda p: p.get('id', 0), reverse=True)
+            return xdp_any[0].get('map_ids', [])
     except json.JSONDecodeError:
         pass
     return []
 
 def get_map_id(map_name):
-    """Get BPF map ID by name from the active XDP program"""
+    """Get BPF map ID by name from the active XDP program.
+    Uses prefix matching because BPF truncates map names to 15 chars
+    (e.g., 'global_stats_map' → 'global_stats_ma')."""
     # First get the map IDs from the active XDP program
     active_map_ids = get_active_xdp_map_ids()
     
@@ -109,14 +128,20 @@ def get_map_id(map_name):
     try:
         maps = json.loads(output)
         
+        def name_matches(bpf_name, search_name):
+            """Match considering BPF 15-char name truncation"""
+            return (bpf_name == search_name or
+                    search_name.startswith(bpf_name) or
+                    bpf_name.startswith(search_name))
+        
         # If we have active map IDs, prefer maps from active program
         if active_map_ids:
             for m in maps:
-                if m.get('name') == map_name and m.get('id') in active_map_ids:
+                if name_matches(m.get('name', ''), map_name) and m.get('id') in active_map_ids:
                     return m.get('id')
         
         # Fallback: find the highest ID (most recently created)
-        matching_maps = [m for m in maps if m.get('name') == map_name]
+        matching_maps = [m for m in maps if name_matches(m.get('name', ''), map_name)]
         if matching_maps:
             # Sort by ID descending to get the newest
             matching_maps.sort(key=lambda x: x.get('id', 0), reverse=True)
@@ -141,6 +166,81 @@ def hex_to_ip(hex_bytes):
             bytes_val = bytes(int(h, 16) for h in hex_bytes)
             return socket.inet_ntoa(bytes_val)
         return None
+    except:
+        return None
+
+# ============================================================================
+# LPM TRIE KEY HELPERS - Hỗ trợ CIDR notation cho whitelist/blacklist
+#
+# LPM key format (IPv4): [prefixlen: 4 bytes LE] [addr: 4 bytes network order]
+# LPM key format (IPv6): [prefixlen: 4 bytes LE] [addr: 16 bytes network order]
+# ============================================================================
+
+def is_ipv6(addr_str):
+    """Check if an address string is IPv6"""
+    return ':' in addr_str.split('/')[0]
+
+def cidr_to_lpm_hex(cidr_str):
+    """Convert IP/CIDR string to LPM trie key hex.
+    
+    Supports:
+      - IPv4: '10.0.0.0/8', '192.168.1.0/24', '8.8.8.8' (auto /32)
+      - IPv6: '2001:db8::/32', 'fe80::1' (auto /128)
+    
+    Returns: (hex_string, normalized_cidr, is_v6) or (None, None, None)
+    """
+    try:
+        # Detect IPv4 vs IPv6
+        v6 = is_ipv6(cidr_str)
+        
+        if v6:
+            if '/' not in cidr_str:
+                cidr_str += '/128'
+            network = ipaddress.ip_network(cidr_str, strict=False)
+            prefixlen = network.prefixlen
+            addr_bytes = network.network_address.packed  # 16 bytes
+        else:
+            if '/' not in cidr_str:
+                cidr_str += '/32'
+            network = ipaddress.ip_network(cidr_str, strict=False)
+            prefixlen = network.prefixlen
+            addr_bytes = network.network_address.packed  # 4 bytes
+        
+        # prefixlen: 4 bytes little-endian
+        prefix_hex = ' '.join(f'0x{b:02x}' for b in prefixlen.to_bytes(4, 'little'))
+        # addr: network byte order (as-is from packed)
+        addr_hex = ' '.join(f'0x{b:02x}' for b in addr_bytes)
+        
+        return f'{prefix_hex} {addr_hex}', str(network), v6
+    except (ValueError, TypeError):
+        return None, None, None
+
+def lpm_hex_to_cidr(hex_bytes, is_v6=False):
+    """Convert LPM trie key hex bytes back to CIDR string.
+    
+    IPv4 key: 8 hex bytes (4 prefixlen + 4 addr)
+    IPv6 key: 20 hex bytes (4 prefixlen + 16 addr)
+    """
+    try:
+        if not isinstance(hex_bytes, list):
+            return None
+        
+        # First 4 bytes: prefixlen (little-endian)
+        prefixlen = int(hex_bytes[0], 16) | (int(hex_bytes[1], 16) << 8) | \
+                   (int(hex_bytes[2], 16) << 16) | (int(hex_bytes[3], 16) << 24)
+        
+        if is_v6:
+            if len(hex_bytes) < 20:
+                return None
+            addr_bytes = bytes(int(h, 16) for h in hex_bytes[4:20])
+            ip = str(ipaddress.IPv6Address(addr_bytes))
+        else:
+            if len(hex_bytes) < 8:
+                return None
+            addr_bytes = bytes(int(h, 16) for h in hex_bytes[4:8])
+            ip = socket.inet_ntoa(addr_bytes)
+        
+        return f"{ip}/{prefixlen}"
     except:
         return None
 
@@ -181,87 +281,171 @@ def u32_to_hex(val):
     return ' '.join(f'0x{(val >> (i*8)) & 0xff:02x}' for i in range(4))
 
 # ============================================================================
-# WHITELIST COMMANDS
+# WHITELIST COMMANDS (LPM Trie - hỗ trợ CIDR notation)
 # ============================================================================
 
-def whitelist_add(ip):
-    """Add IP to whitelist"""
-    map_id = get_map_id('whitelist_map')
+def _lpm_add(map_name, ip_or_cidr, list_name, value_hex='0x01'):
+    """Generic add for LPM Trie based maps (whitelist/blacklist).
+    
+    Supports IPv4 and IPv6. Auto-detects version and selects the correct map.
+    IPv6 addresses use the _v6 variant of the map.
+    """
+    key_hex, normalized, v6 = cidr_to_lpm_hex(ip_or_cidr)
+    if not key_hex:
+        print(f"{Colors.RED}Error: Invalid IP/CIDR: {ip_or_cidr}{Colors.END}")
+        return 1
+    
+    actual_map = f"{map_name}_v6" if v6 else map_name
+    map_id = get_map_id(actual_map)
     if not map_id:
-        print(f"{Colors.RED}Error: whitelist_map not found. Is XDP program loaded?{Colors.END}")
+        print(f"{Colors.RED}Error: {actual_map} not found. Is XDP program loaded?{Colors.END}")
         return 1
     
-    ip_hex = ip_to_hex(ip)
-    if not ip_hex:
-        print(f"{Colors.RED}Error: Invalid IP address: {ip}{Colors.END}")
-        return 1
-    
-    # Value is __u8 = 1
-    cmd = ['map', 'update', 'id', str(map_id), 'key', *ip_hex.split(), 'value', '0x01']
+    cmd = ['map', 'update', 'id', str(map_id), 'key', *key_hex.split(), 'value', value_hex]
     output, err = run_bpftool(cmd)
     
     if err:
         print(f"{Colors.RED}Error: {err}{Colors.END}")
         return 1
     
-    print(f"{Colors.GREEN}✓ Added {ip} to whitelist{Colors.END}")
+    v_label = "IPv6" if v6 else "IPv4"
+    print(f"{Colors.GREEN}✓ Added {normalized} ({v_label}) to {list_name}{Colors.END}")
     return 0
 
-def whitelist_remove(ip):
-    """Remove IP from whitelist"""
-    map_id = get_map_id('whitelist_map')
+def _lpm_remove(map_name, ip_or_cidr, list_name):
+    """Generic remove for LPM Trie based maps."""
+    key_hex, normalized, v6 = cidr_to_lpm_hex(ip_or_cidr)
+    if not key_hex:
+        print(f"{Colors.RED}Error: Invalid IP/CIDR: {ip_or_cidr}{Colors.END}")
+        return 1
+    
+    actual_map = f"{map_name}_v6" if v6 else map_name
+    map_id = get_map_id(actual_map)
     if not map_id:
-        print(f"{Colors.RED}Error: whitelist_map not found{Colors.END}")
+        print(f"{Colors.RED}Error: {actual_map} not found{Colors.END}")
         return 1
     
-    ip_hex = ip_to_hex(ip)
-    if not ip_hex:
-        print(f"{Colors.RED}Error: Invalid IP address: {ip}{Colors.END}")
-        return 1
-    
-    cmd = ['map', 'delete', 'id', str(map_id), 'key', *ip_hex.split()]
+    cmd = ['map', 'delete', 'id', str(map_id), 'key', *key_hex.split()]
     output, err = run_bpftool(cmd)
     
     if err:
         print(f"{Colors.RED}Error: {err}{Colors.END}")
         return 1
     
-    print(f"{Colors.GREEN}✓ Removed {ip} from whitelist{Colors.END}")
+    v_label = "IPv6" if v6 else "IPv4"
+    print(f"{Colors.GREEN}✓ Removed {normalized} ({v_label}) from {list_name}{Colors.END}")
     return 0
 
-def whitelist_list():
-    """List all whitelisted IPs"""
-    map_id = get_map_id('whitelist_map')
+def _lpm_list(map_name, list_name, is_v6=False, filter_value=None):
+    """Generic list for LPM Trie based maps. Optionally filter by value."""
+    map_id = get_map_id(map_name)
     if not map_id:
-        print(f"{Colors.RED}Error: whitelist_map not found{Colors.END}")
-        return 1
+        print(f"{Colors.RED}Error: {map_name} not found{Colors.END}")
+        return [], 1
     
     output, err = run_bpftool(['map', 'dump', 'id', str(map_id), '-j'])
     if err:
         print(f"{Colors.RED}Error: {err}{Colors.END}")
-        return 1
+        return [], 1
     
+    cidrs = []
     try:
         entries = json.loads(output) if output.strip() else []
-        print(f"{Colors.BOLD}Whitelisted IPs:{Colors.END}")
-        print("=" * 40)
-        
-        if not entries:
-            print("  (empty)")
-        else:
-            for entry in entries:
-                key = entry.get('key')
-                if key:
-                    ip = hex_to_ip(key)
-                    if ip:
-                        print(f"  {Colors.GREEN}✓{Colors.END} {ip}")
-        
-        print("=" * 40)
-        print(f"Total: {len(entries)} IPs")
-        return 0
+        for entry in entries:
+            key = entry.get('key')
+            val = entry.get('value')
+            if key:
+                # Filter by value if specified (ACL_ALLOW=1, ACL_DENY=2)
+                if filter_value is not None and val is not None:
+                    actual_val = val if isinstance(val, int) else (val[0] if isinstance(val, list) else None)
+                    if actual_val != filter_value:
+                        continue
+                cidr = lpm_hex_to_cidr(key, is_v6=is_v6)
+                if cidr:
+                    cidrs.append(cidr)
     except json.JSONDecodeError:
-        print(f"{Colors.RED}Error: Failed to parse response{Colors.END}")
-        return 1
+        pass
+    return cidrs, 0
+
+def whitelist_add(ip_or_cidr):
+    """Add IP or CIDR range to whitelist (ACL_ALLOW=1)"""
+    return _lpm_add('acl_map', ip_or_cidr, 'whitelist', value_hex='0x01')
+
+def whitelist_remove(ip_or_cidr):
+    """Remove IP or CIDR range from whitelist"""
+    return _lpm_remove('acl_map', ip_or_cidr, 'whitelist')
+
+def whitelist_list():
+    """List all whitelisted IPs/CIDRs (IPv4 + IPv6)"""
+    print(f"{Colors.BOLD}Whitelisted IPs/CIDRs:{Colors.END}")
+    print("=" * 50)
+    
+    total = 0
+    
+    # IPv4 whitelist (filter value==1 = ACL_ALLOW)
+    cidrs_v4, err4 = _lpm_list('acl_map', 'whitelist', is_v6=False, filter_value=1)
+    if cidrs_v4:
+        print(f"  {Colors.CYAN}── IPv4 ──{Colors.END}")
+        for cidr in sorted(cidrs_v4):
+            print(f"  {Colors.GREEN}✓{Colors.END} {cidr}")
+        total += len(cidrs_v4)
+    
+    # IPv6 whitelist
+    cidrs_v6, err6 = _lpm_list('acl_map_v6', 'whitelist', is_v6=True, filter_value=1)
+    if cidrs_v6:
+        print(f"  {Colors.CYAN}── IPv6 ──{Colors.END}")
+        for cidr in sorted(cidrs_v6):
+            print(f"  {Colors.GREEN}✓{Colors.END} {cidr}")
+        total += len(cidrs_v6)
+    
+    if total == 0:
+        print("  (empty)")
+    
+    print("=" * 50)
+    print(f"Total: {total} entries")
+    return 0
+
+# ============================================================================
+# BLACKLIST COMMANDS (LPM Trie - hỗ trợ CIDR notation)
+# ============================================================================
+
+def blacklist_add(ip_or_cidr):
+    """Add IP or CIDR range to blacklist (ACL_DENY=2)"""
+    return _lpm_add('acl_map', ip_or_cidr, 'blacklist', value_hex='0x02')
+
+def blacklist_remove(ip_or_cidr):
+    """Remove IP or CIDR range from blacklist"""
+    return _lpm_remove('acl_map', ip_or_cidr, 'blacklist')
+
+def blacklist_list():
+    """List all blacklisted IPs/CIDRs (IPv4 + IPv6)"""
+    print(f"{Colors.BOLD}Blacklisted IPs/CIDRs:{Colors.END}")
+    print("=" * 50)
+    
+    total = 0
+    
+    # IPv4 blacklist (filter value==2 = ACL_DENY)
+    cidrs_v4, err4 = _lpm_list('acl_map', 'blacklist', is_v6=False, filter_value=2)
+    if cidrs_v4:
+        print(f"  {Colors.CYAN}── IPv4 ──{Colors.END}")
+        for cidr in sorted(cidrs_v4):
+            print(f"  {Colors.RED}✗{Colors.END} {cidr}")
+        total += len(cidrs_v4)
+    
+    # IPv6 blacklist
+    cidrs_v6, err6 = _lpm_list('acl_map_v6', 'blacklist', is_v6=True, filter_value=2)
+    if cidrs_v6:
+        print(f"  {Colors.CYAN}── IPv6 ──{Colors.END}")
+        for cidr in sorted(cidrs_v6):
+            print(f"  {Colors.RED}✗{Colors.END} {cidr}")
+        total += len(cidrs_v6)
+    
+    if total == 0:
+        print("  (empty)")
+    
+    print("=" * 50)
+    print(f"Total: {total} entries")
+    return 0
 
 # ============================================================================
 # PORT COMMANDS
@@ -515,12 +699,12 @@ def format_bytes(b):
 
 def stats_show():
     """Show statistics"""
-    map_id = get_map_id('stats_map')
+    map_id = get_map_id('global_stats_map')
     if not map_id:
-        print(f"{Colors.RED}Error: stats_map not found{Colors.END}")
+        print(f"{Colors.RED}Error: global_stats_map not found{Colors.END}")
         return 1
     
-    output, err = run_bpftool(['map', 'dump', 'id', str(map_id)])
+    output, err = run_bpftool(['map', 'dump', 'id', str(map_id), '-j'])
     if err:
         print(f"{Colors.RED}Error: {err}{Colors.END}")
         return 1
@@ -529,36 +713,53 @@ def stats_show():
         entries = json.loads(output) if output.strip() else []
         
         total = {
-            'packets_passed': 0,
-            'bytes_passed': 0,
-            'packets_dropped': 0,
-            'bytes_dropped': 0,
-            'drop_reasons': [0] * 10
+            'packets_passed': 0, 'bytes_passed': 0,
+            'packets_dropped': 0, 'bytes_dropped': 0,
+            'packets_redirected': 0, 'bytes_redirected': 0,
+            'drop_reasons': [0] * 11
         }
         
         for entry in entries:
             values = entry.get('values', [])
             for cpu_entry in values:
                 if isinstance(cpu_entry, dict) and 'value' in cpu_entry:
-                    stats = cpu_entry['value']
-                    if isinstance(stats, dict):
-                        total['packets_passed'] += stats.get('packets_passed', 0)
-                        total['bytes_passed'] += stats.get('bytes_passed', 0)
-                        total['packets_dropped'] += stats.get('packets_dropped', 0)
-                        total['bytes_dropped'] += stats.get('bytes_dropped', 0)
-                        
-                        reasons = stats.get('drop_reasons', [])
+                    ext = cpu_entry['value']
+                    
+                    if isinstance(ext, list):
+                        try:
+                            data = bytes([int(x, 16) for x in ext])
+                            if len(data) >= 264:
+                                fields = struct.unpack('<33Q', data[:264])
+                                total['packets_passed'] += fields[0]
+                                total['bytes_passed'] += fields[1]
+                                total['packets_dropped'] += fields[2]
+                                total['bytes_dropped'] += fields[3]
+                                total['packets_redirected'] += fields[4]
+                                total['bytes_redirected'] += fields[5]
+                                for j in range(11):
+                                    total['drop_reasons'][j] += fields[6+j]
+                        except:
+                            pass
+                    elif isinstance(ext, dict):
+                        total['packets_passed'] += ext.get('packets_passed', 0)
+                        total['bytes_passed'] += ext.get('bytes_passed', 0)
+                        total['packets_dropped'] += ext.get('packets_dropped', 0)
+                        total['bytes_dropped'] += ext.get('bytes_dropped', 0)
+                        total['packets_redirected'] += ext.get('packets_redirected', 0)
+                        total['bytes_redirected'] += ext.get('bytes_redirected', 0)
+                        reasons = ext.get('drop_reasons', [])
                         if isinstance(reasons, list):
-                            for i, r in enumerate(reasons[:10]):
-                                total['drop_reasons'][i] += int(r)
+                            for j, r in enumerate(reasons[:11]):
+                                total['drop_reasons'][j] += int(r)
         
-        total_pkts = total['packets_passed'] + total['packets_dropped']
+        total_pkts = total['packets_passed'] + total['packets_dropped'] + total['packets_redirected']
         drop_rate = (total['packets_dropped'] / total_pkts * 100) if total_pkts > 0 else 0
         
         print(f"{Colors.BOLD}XDP Anti-DDoS Statistics:{Colors.END}")
         print("=" * 60)
-        print(f"  {Colors.GREEN}Passed:{Colors.END}  {format_number(total['packets_passed']):>12} pkts | {format_bytes(total['bytes_passed']):>12}")
-        print(f"  {Colors.RED}Dropped:{Colors.END} {format_number(total['packets_dropped']):>12} pkts | {format_bytes(total['bytes_dropped']):>12}")
+        print(f"  {Colors.GREEN}Passed:{Colors.END}    {format_number(total['packets_passed']):>12} pkts | {format_bytes(total['bytes_passed']):>12}")
+        print(f"  {Colors.RED}Dropped:{Colors.END}   {format_number(total['packets_dropped']):>12} pkts | {format_bytes(total['bytes_dropped']):>12}")
+        print(f"  {Colors.CYAN}Redirected:{Colors.END} {format_number(total['packets_redirected']):>12} pkts | {format_bytes(total['bytes_redirected']):>12}")
         print(f"  {Colors.YELLOW}Drop Rate:{Colors.END} {drop_rate:>10.2f}%")
         print()
         print(f"{Colors.BOLD}Drop Reasons:{Colors.END}")
@@ -578,91 +779,89 @@ def stats_show():
 
 def stats_top(limit=10):
     """Show top IPs by traffic"""
-    map_id = get_map_id('ip_stats_map')
+    print(f"{Colors.YELLOW}Note: Per-IP statistics (ip_stats_map) have been removed from the kernel \nto optimize performance under DDoS conditions.{Colors.END}")
+    return 0
+
+def stats_clear():
+    """Clear all statistics from global_stats_map"""
+    map_id = get_map_id('global_stats_map')
     if not map_id:
-        print(f"{Colors.RED}Error: ip_stats_map not found{Colors.END}")
-        return 1
-    
-    output, err = run_bpftool(['map', 'dump', 'id', str(map_id), '-j'])
-    if err:
-        print(f"{Colors.RED}Error: {err}{Colors.END}")
-        return 1
-    
-    try:
-        entries = json.loads(output) if output.strip() else []
-        
-        ip_data = []
-        for entry in entries:
-            key = entry.get('key')
-            value = entry.get('value')
-            
-            if key and value:
-                ip = hex_to_ip(key)
-                if ip and isinstance(value, dict):
-                    ip_data.append({
-                        'ip': ip,
-                        'passed': value.get('packets_passed', 0),
-                        'dropped': value.get('packets_dropped', 0),
-                        'bytes_passed': value.get('bytes_passed', 0),
-                        'bytes_dropped': value.get('bytes_dropped', 0)
-                    })
-        
-        # Top dropped
-        print(f"{Colors.BOLD}Top {limit} Blocked IPs:{Colors.END}")
-        print("=" * 70)
-        top_dropped = sorted(ip_data, key=lambda x: x['dropped'], reverse=True)[:limit]
-        for i, ip in enumerate(top_dropped, 1):
-            if ip['dropped'] > 0:
-                print(f"  {i:2d}. {ip['ip']:15s} | {Colors.RED}Dropped:{Colors.END} {format_number(ip['dropped']):>10} pkts")
-        if not top_dropped or all(ip['dropped'] == 0 for ip in top_dropped):
-            print("  (no blocked IPs)")
-        
-        print()
-        
-        # Top passed
-        print(f"{Colors.BOLD}Top {limit} Passed IPs:{Colors.END}")
-        print("=" * 70)
-        top_passed = sorted(ip_data, key=lambda x: x['passed'], reverse=True)[:limit]
-        for i, ip in enumerate(top_passed, 1):
-            if ip['passed'] > 0:
-                print(f"  {i:2d}. {ip['ip']:15s} | {Colors.GREEN}Passed:{Colors.END}  {format_number(ip['passed']):>10} pkts")
-        if not top_passed or all(ip['passed'] == 0 for ip in top_passed):
-            print("  (no passed IPs)")
-        
-        print("=" * 70)
-        return 0
-    except json.JSONDecodeError:
-        print(f"{Colors.RED}Error: Failed to parse response{Colors.END}")
+        print(f"{Colors.RED}Error: global_stats_map not found{Colors.END}")
         return 1
 
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+
+        class bpf_attr_get_fd(ctypes.Structure):
+            _fields_ = [("map_id", ctypes.c_uint32), ("next_id", ctypes.c_uint32), ("open_flags", ctypes.c_uint32)]
+
+        class bpf_attr_update(ctypes.Structure):
+            _fields_ = [("map_fd", ctypes.c_uint32), ("key", ctypes.c_uint64), ("value", ctypes.c_uint64), ("flags", ctypes.c_uint64)]
+
+        # BPF_MAP_GET_FD_BY_ID = 14
+        attr1 = bpf_attr_get_fd(map_id=int(map_id))
+        fd = libc.syscall(321, 14, ctypes.byref(attr1), ctypes.sizeof(attr1))
+        if fd < 0:
+            print(f"{Colors.RED}Error: Failed to get fd for map_id {map_id}{Colors.END}")
+            return 1
+        
+        num_cpus = os.cpu_count() or 1
+        key = ctypes.c_uint32(0)
+        value = (ctypes.c_uint8 * (256 * num_cpus))()
+        
+        # BPF_MAP_UPDATE_ELEM = 2
+        attr2 = bpf_attr_update(map_fd=fd, key=ctypes.addressof(key), value=ctypes.addressof(value), flags=0)
+        res = libc.syscall(321, 2, ctypes.byref(attr2), ctypes.sizeof(attr2))
+        
+        if res == 0:
+            print(f"{Colors.GREEN}✓ Statistics cleared successfully{Colors.END}")
+            return 0
+        else:
+            print(f"{Colors.RED}Error: Failed to clear stats, syscall returned {res}{Colors.END}")
+            return 1
+    except Exception as e:
+        print(f"{Colors.RED}Error clearing statistics: {e}{Colors.END}")
+        return 1
 # ============================================================================
 # MAIN
 # ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description='XDP Anti-DDoS CLI Tool',
+        description='XDP Anti-DDoS CLI Tool (LPM Trie - CIDR support)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s whitelist add 8.8.8.8       # Add Google DNS to whitelist
-  %(prog)s port init                   # Initialize default blocked ports
-  %(prog)s config set pps-limit 20000  # Set UDP rate limit to 20k pps
-  %(prog)s stats show                  # Show statistics
-  %(prog)s stats top                   # Show top IPs
+  %(prog)s whitelist add 8.8.8.8           # Add single IP (auto /32)
+  %(prog)s whitelist add 10.0.0.0/8        # Add entire /8 subnet
+  %(prog)s whitelist add 2001:db8::/32      # Add IPv6 subnet
+  %(prog)s blacklist add 192.168.0.0/16     # Block entire /16 subnet
+  %(prog)s blacklist add fe80::1            # Block single IPv6 (auto /128)
+  %(prog)s port init                       # Initialize default blocked ports
+  %(prog)s config set pps-limit 20000      # Set UDP rate limit to 20k pps
+  %(prog)s stats show                      # Show statistics
         """
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     
     # Whitelist commands
-    wl_parser = subparsers.add_parser('whitelist', help='Manage IP whitelist')
+    wl_parser = subparsers.add_parser('whitelist', help='Manage IP/CIDR whitelist')
     wl_sub = wl_parser.add_subparsers(dest='action')
-    wl_add = wl_sub.add_parser('add', help='Add IP to whitelist')
-    wl_add.add_argument('ip', help='IP address to add')
-    wl_rm = wl_sub.add_parser('remove', help='Remove IP from whitelist')
-    wl_rm.add_argument('ip', help='IP address to remove')
-    wl_sub.add_parser('list', help='List whitelisted IPs')
+    wl_add = wl_sub.add_parser('add', help='Add IP/CIDR to whitelist')
+    wl_add.add_argument('ip', help='IP address or CIDR range (e.g. 10.0.0.0/8, 8.8.8.8, 2001:db8::/32)')
+    wl_rm = wl_sub.add_parser('remove', help='Remove IP/CIDR from whitelist')
+    wl_rm.add_argument('ip', help='IP address or CIDR range to remove')
+    wl_sub.add_parser('list', help='List whitelisted IPs/CIDRs')
+    
+    # Blacklist commands
+    bl_parser = subparsers.add_parser('blacklist', help='Manage IP/CIDR blacklist')
+    bl_sub = bl_parser.add_subparsers(dest='action')
+    bl_add = bl_sub.add_parser('add', help='Add IP/CIDR to blacklist')
+    bl_add.add_argument('ip', help='IP address or CIDR range (e.g. 10.0.0.0/8, 1.2.3.4, fe80::/10)')
+    bl_rm = bl_sub.add_parser('remove', help='Remove IP/CIDR from blacklist')
+    bl_rm.add_argument('ip', help='IP address or CIDR range to remove')
+    bl_sub.add_parser('list', help='List blacklisted IPs/CIDRs')
     
     # Port commands
     port_parser = subparsers.add_parser('port', help='Manage blocked ports')
@@ -687,6 +886,7 @@ Examples:
     stats_parser = subparsers.add_parser('stats', help='View statistics')
     stats_sub = stats_parser.add_subparsers(dest='action')
     stats_sub.add_parser('show', help='Show statistics')
+    stats_sub.add_parser('clear', help='Clear statistics')
     stats_top_p = stats_sub.add_parser('top', help='Show top IPs')
     stats_top_p.add_argument('-n', '--limit', type=int, default=10, help='Number of IPs to show')
     
@@ -709,6 +909,17 @@ Examples:
             return whitelist_list()
         else:
             wl_parser.print_help()
+            return 1
+    
+    elif args.command == 'blacklist':
+        if args.action == 'add':
+            return blacklist_add(args.ip)
+        elif args.action == 'remove':
+            return blacklist_remove(args.ip)
+        elif args.action == 'list':
+            return blacklist_list()
+        else:
+            bl_parser.print_help()
             return 1
     
     elif args.command == 'port':
@@ -738,6 +949,8 @@ Examples:
     elif args.command == 'stats':
         if args.action == 'show':
             return stats_show()
+        elif args.action == 'clear':
+            return stats_clear()
         elif args.action == 'top':
             return stats_top(args.limit)
         else:
