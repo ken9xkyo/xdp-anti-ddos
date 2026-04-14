@@ -2,21 +2,22 @@
 
 {% block content %}
 <div class="header">
-    <h1>Whitelist Management</h1>
+    <h1>Blacklist Management</h1>
 </div>
 
 <div class="card">
-    <h3>Add IP to Whitelist</h3>
+    <h3>Add IP to Blacklist</h3>
+    <p class="help-text">Blacklisted IPs will be immediately dropped, regardless of other rules. Takes priority over whitelist.</p>
     <form method="POST" class="inline-form">
         <input type="hidden" name="action" value="add">
         <input type="text" name="ip" placeholder="IP or Network (e.g. 192.168.1.10 or 10.0.0.0/8)" required
             pattern="^([0-9a-fA-F:\.]+)((?:/[0-9]{1,3})?)$" title="Enter a valid IP address or CIDR network block">
-        <button type="submit" class="btn btn-primary">Add IP</button>
+        <button type="submit" class="btn btn-danger">Block IP</button>
     </form>
 </div>
 
 <div class="card">
-    <h3>Whitelisted IPs</h3>
+    <h3>Blacklisted IPs</h3>
     <table class="table">
         <thead>
             <tr>
@@ -27,19 +28,19 @@
         <tbody>
             {% for ip in ips %}
             <tr>
-                <td>{{ ip }}</td>
+                <td><span class="badge-blacklist">{{ ip }}</span></td>
                 <td>
                     <form method="POST" style="display:inline;">
                         <input type="hidden" name="action" value="remove">
                         <input type="hidden" name="ip" value="{{ ip }}">
-                        <button type="submit" class="btn btn-danger btn-sm"
-                            onclick="return confirm('Remove {{ ip }} from whitelist?')">Remove</button>
+                        <button type="submit" class="btn btn-secondary btn-sm"
+                            onclick="return confirm('Unblock {{ ip }}?')">Unblock</button>
                     </form>
                 </td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="2" class="text-center">No IPs in whitelist</td>
+                <td colspan="2" class="text-center">No IPs in blacklist</td>
             </tr>
             {% endfor %}
         </tbody>

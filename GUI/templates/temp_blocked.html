@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="header">
+    <h1>Temporary Blocked IPs</h1>
+    <a href="{{ url_for('temp_blocked') }}" class="btn btn-secondary">Refresh</a>
+</div>
+
+<div class="card">
+    <h3>Auto-Blocked IPs</h3>
+    <p class="help-text">IPs listed here were automatically blocked for 10 minutes due to violations (rate limit exceeded, amplification attack, invalid TCP flags, etc.). You can manually unblock them early.</p>
+    <table class="table" id="temp-blocked-table">
+        <thead>
+            <tr>
+                <th>IP Address</th>
+                <th>Time Remaining</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td><span class="badge-temp-block">{{ entry.ip }}</span></td>
+                <td>
+                    {% if entry.remaining_seconds > 0 %}
+                        {% set mins = entry.remaining_seconds // 60 %}
+                        {% set secs = entry.remaining_seconds % 60 %}
+                        <span class="timer" data-remaining="{{ entry.remaining_seconds }}">
+                            {{ "{:02d}:{:02d}".format(mins, secs) }}
+                        </span>
+                    {% elif entry.remaining_seconds == -1 %}
+                        <span class="timer">Unknown</span>
+                    {% else %}
+                        <span class="timer expired">Expired</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if entry.remaining_seconds > 300 %}
+                        <span class="status-badge status-high">Blocked</span>
+                    {% elif entry.remaining_seconds > 60 %}
+                        <span class="status-badge status-medium">Expiring Soon</span>
+                    {% elif entry.remaining_seconds > 0 %}
+                        <span class="status-badge status-low">Almost Expired</span>
+                    {% else %}
+                        <span class="status-badge status-expired">Expired</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <form method="POST" style="display:inline;">
+                        <input type="hidden" name="action" value="unblock">
+                        <input type="hidden" name="ip" value="{{ entry.ip }}">
+                        <button type="submit" class="btn btn-primary btn-sm"
+                            onclick="return confirm('Unblock {{ entry.ip }}?')">Unblock</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="4" class="text-center">No temporarily blocked IPs</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if entries %}
+    <div class="blocked-summary">
+        <strong>{{ entries|length }}</strong> IP(s) currently blocked
+    </div>
+    {% endif %}
+</div>
+
+<script>
+    // Countdown timers
+    document.querySelectorAll('.timer[data-remaining]').forEach(function(el) {
+        var remaining = parseInt(el.getAttribute('data-remaining'));
+        if (remaining <= 0) return;
+
+        setInterval(function() {
+            remaining--;
+            if (remaining <= 0) {
+                el.textContent = 'Expired';
+                el.classList.add('expired');
+                return;
+            }
+            var m = Math.floor(remaining / 60);
+            var s = remaining % 60;
+            el.textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+        }, 1000);
+    });
+
+    // Auto-refresh every 15 seconds
+    setInterval(function() {
+        window.location.reload();
+    }, 15000);
+</script>
+{% endblock %}

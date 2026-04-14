@@ -94,6 +94,7 @@ h3 { font-size: 1.25rem; margin-top: 0; margin-bottom: 1rem; }
 }
 .stat-card.passed { border-color: var(--success); }
 .stat-card.dropped { border-color: var(--danger); }
+.stat-card.redirected { border-color: #3b82f6; }
 .stat-card.rate { border-color: var(--secondary); }
 
 .stat-card h3 {
@@ -208,3 +209,114 @@ footer {
     padding: 2rem 0;
     margin-top: auto;
 }
+
+/* Badges */
+.badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 0.25rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: white;
+}
+.badge-udp { background-color: #f59e0b; }
+.badge-tcp { background-color: #3b82f6; }
+.badge-icmp { background-color: #8b5cf6; }
+.badge-other { background-color: #6b7280; }
+
+/* Help text */
+.help-text {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
+}
+
+/* Two-column grid */
+.two-col {
+    grid-template-columns: repeat(2, 1fr);
+}
+@media (max-width: 768px) {
+    .two-col { grid-template-columns: 1fr; }
+}
+
+/* Code */
+code {
+    background-color: #f1f5f9;
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.25rem;
+    font-size: 0.85rem;
+    font-family: 'Courier New', monospace;
+}
+
+/* Blacklist badge */
+.badge-blacklist {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 0.25rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #991b1b;
+    background-color: #fee2e2;
+    font-family: 'Courier New', monospace;
+}
+
+/* Temp block badge */
+.badge-temp-block {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 0.25rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #92400e;
+    background-color: #fef3c7;
+    font-family: 'Courier New', monospace;
+}
+
+/* Status badges */
+.status-badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+.status-high {
+    color: #991b1b;
+    background-color: #fee2e2;
+}
+.status-medium {
+    color: #92400e;
+    background-color: #fef3c7;
+}
+.status-low {
+    color: #065f46;
+    background-color: #d1fae5;
+}
+.status-expired {
+    color: #6b7280;
+    background-color: #f3f4f6;
+}
+
+/* Timer */
+.timer {
+    font-family: 'Courier New', monospace;
+    font-weight: 600;
+    font-size: 1rem;
+    color: #dc2626;
+}
+.timer.expired {
+    color: #6b7280;
+}
+
+/* Blocked summary */
+.blocked-summary {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    background-color: #fef3c7;
+    border-radius: 0.375rem;
+    color: #92400e;
+    font-size: 0.875rem;
+}
+

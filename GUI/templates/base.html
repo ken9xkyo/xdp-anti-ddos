@@ -13,7 +13,10 @@
             <div class="nav-links">
                 <a href="{{ url_for('index') }}" class="{{ 'active' if request.path == '/' else '' }}">Dashboard</a>
                 <a href="{{ url_for('whitelist') }}" class="{{ 'active' if request.path == '/whitelist' else '' }}">Whitelist</a>
+                <a href="{{ url_for('blacklist') }}" class="{{ 'active' if request.path == '/blacklist' else '' }}">Blacklist</a>
+                <a href="{{ url_for('temp_blocked') }}" class="{{ 'active' if request.path == '/temp-blocked' else '' }}">Temp Blocked</a>
                 <a href="{{ url_for('ports') }}" class="{{ 'active' if request.path == '/ports' else '' }}">Blocked Ports</a>
+                <a href="{{ url_for('ip_protected') }}" class="{{ 'active' if request.path == '/ip-protected' else '' }}">IP Protected</a>
                 <a href="{{ url_for('config') }}" class="{{ 'active' if request.path == '/config' else '' }}">Configuration</a>
             </div>
         </div>

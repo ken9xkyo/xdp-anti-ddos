@@ -12,6 +12,8 @@
     <p>Is the XDP program loaded via `test_xdp.sh`?</p>
 </div>
 {% else %}
+
+{# === Traffic Overview Cards === #}
 <div class="stats-grid">
     <div class="card stat-card passed">
         <h3>Passed Traffic</h3>
@@ -25,6 +27,13 @@
         <div class="value">{{ "{:,}".format(stats.packets_dropped) }}</div>
         <div class="unit">packets</div>
         <div class="sub-value">{{ "{:.2f}".format(stats.bytes_dropped / 1024 / 1024) }} MB</div>
+    </div>
+
+    <div class="card stat-card redirected">
+        <h3>Redirected Traffic</h3>
+        <div class="value">{{ "{:,}".format(stats.packets_redirected) }}</div>
+        <div class="unit">packets</div>
+        <div class="sub-value">{{ "{:.2f}".format(stats.get('bytes_redirected', 0) / 1024 / 1024) }} MB</div>
     </div>
 
     <div class="card stat-card rate">
@@ -41,6 +50,7 @@
     </div>
 </div>
 
+{# === Drop Reasons === #}
 <div class="card">
     <h2>Drop Reasons</h2>
     <table class="table">
@@ -75,5 +85,123 @@
         </tbody>
     </table>
 </div>
+
+{# === Protocol Breakdown === #}
+<div class="stats-grid two-col">
+    <div class="card">
+        <h2>Protocol Breakdown</h2>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Protocol</th>
+                    <th>Packets</th>
+                    <th>Percentage</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% set proto_total = stats.protocols.values() | sum %}
+                {% for proto, count in stats.protocols.items() %}
+                {% if count > 0 %}
+                <tr>
+                    <td><span class="badge badge-{{ proto | lower }}">{{ proto }}</span></td>
+                    <td>{{ "{:,}".format(count) }}</td>
+                    <td>
+                        {% if proto_total > 0 %}
+                        {{ "{:.1f}".format(count / proto_total * 100) }}%
+                        {% else %}0%{% endif %}
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+                {% if proto_total == 0 %}
+                <tr>
+                    <td colspan="3" class="text-center">No traffic recorded</td>
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    {# === Packet Size Distribution === #}
+    <div class="card">
+        <h2>Packet Size Distribution</h2>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Size Range</th>
+                    <th>Count</th>
+                    <th>Percentage</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% set bucket_labels = ['0 – 64 B', '65 – 128 B', '129 – 256 B', '257 – 512 B', '513 – 1024 B', '1025+
+                B'] %}
+                {% set bucket_total = stats.pkt_size_buckets | sum %}
+                {% for i in range(6) %}
+                {% if stats.pkt_size_buckets[i] > 0 %}
+                <tr>
+                    <td>{{ bucket_labels[i] }}</td>
+                    <td>{{ "{:,}".format(stats.pkt_size_buckets[i]) }}</td>
+                    <td>
+                        {% if bucket_total > 0 %}
+                        {{ "{:.1f}".format(stats.pkt_size_buckets[i] / bucket_total * 100) }}%
+                        {% else %}0%{% endif %}
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+                {% if bucket_total == 0 %}
+                <tr>
+                    <td colspan="3" class="text-center">No data</td>
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# === Amplification Source Ports === #}
+<div class="card">
+    <h2>UDP Amplification Source Ports</h2>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Source Port</th>
+                <th>Packets</th>
+                <th>Percentage</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% set sport_total = stats.reflection_ports.values() | sum %}
+            {% for port_name, count in stats.reflection_ports.items() %}
+            {% if count > 0 %}
+            <tr>
+                <td>{{ port_name }}</td>
+                <td>{{ "{:,}".format(count) }}</td>
+                <td>
+                    {% if sport_total > 0 %}
+                    {{ "{:.1f}".format(count / sport_total * 100) }}%
+                    {% else %}0%{% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+            {% if sport_total == 0 %}
+            <tr>
+                <td colspan="3" class="text-center">No amplification traffic detected</td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+    // Tự động cập nhật số liệu mỗi giây
+    setInterval(function () {
+        window.location.reload();
+    }, 5000);
+
+</script>
+
 {% endif %}
 {% endblock %}

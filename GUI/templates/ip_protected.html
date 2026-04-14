@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="header">
+    <h1>IP Protected Management</h1>
+</div>
+
+<div class="card">
+    <h3>Add IP Protected</h3>
+    <p class="help-text">Enter a destination IP to protect. The system will automatically resolve the route, interface, and MAC addresses for L2 redirect.</p>
+    <form method="POST" class="inline-form">
+        <input type="hidden" name="action" value="add">
+        <input type="text" name="ip" placeholder="Destination IP (e.g. 10.0.0.2)" required
+            pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$">
+        <button type="submit" class="btn btn-primary">Add IP</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3>Current IP Protected Entries</h3>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Destination IP</th>
+                <th>Interface Index</th>
+                <th>Source MAC</th>
+                <th>Destination MAC</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td>{{ entry.ip }}</td>
+                <td>{{ entry.ifindex }}</td>
+                <td><code>{{ entry.src_mac }}</code></td>
+                <td><code>{{ entry.dst_mac }}</code></td>
+                <td>
+                    <form method="POST" style="display:inline;">
+                        <input type="hidden" name="action" value="remove">
+                        <input type="hidden" name="ip" value="{{ entry.ip }}">
+                        <button type="submit" class="btn btn-danger btn-sm"
+                            onclick="return confirm('Remove IP Protected for {{ entry.ip }}?')">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="text-center">No IP Protected entries configured</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
