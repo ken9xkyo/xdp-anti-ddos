@@ -36,7 +36,8 @@ DROP_REASONS = {
     6: "icmp_ratelimit",
     7: "syn_ratelimit",
     8: "blacklisted_ip",
-    9: "reserved"
+    9: "parse_error",
+    10: "temp_block"
 }
 
 # Packet size bucket labels
@@ -139,19 +140,18 @@ class MetricsCollector:
     
     def collect_stats(self):
         """Collect stats from BPF maps"""
-        self.collect_basic_stats()
-        self.collect_extended_stats()
+        self.collect_global_stats()
         self.collect_top_ips()
         self.collect_system_stats()
         self.collect_map_entries()
     
-    def collect_basic_stats(self):
-        """Collect basic stats from stats_map"""
-        map_id = self.get_map_id('stats_map')
+    def collect_global_stats(self):
+        """Collect stats from global_stats_map"""
+        map_id = self.get_map_id('global_stats_map')
         if not map_id:
             return
         
-        output, _ = self.run_bpftool(['map', 'dump', 'id', str(map_id)])
+        output, _ = self.run_bpftool(['map', 'dump', 'id', str(map_id), '-j'])
         if not output:
             return
         
@@ -160,23 +160,82 @@ class MetricsCollector:
             total = {
                 'packets_passed': 0, 'bytes_passed': 0,
                 'packets_dropped': 0, 'bytes_dropped': 0,
-                'drop_reasons': [0] * 10
+                'packets_redirected': 0, 'bytes_redirected': 0,
+                'drop_reasons': [0] * 11,
+                'proto_udp': 0, 'proto_tcp': 0, 'proto_icmp': 0, 'proto_other': 0,
+                'pkt_size_buckets': [0] * 6,
+                'sport_dns': 0, 'sport_ntp': 0, 'sport_ssdp': 0,
+                'sport_memcached': 0, 'sport_chargen': 0, 'sport_other_reflection': 0
             }
             
             for entry in entries:
                 values = entry.get('values', [])
                 for cpu_entry in values:
                     if isinstance(cpu_entry, dict) and 'value' in cpu_entry:
-                        stats = cpu_entry['value']
-                        if isinstance(stats, dict):
-                            total['packets_passed'] += stats.get('packets_passed', 0)
-                            total['bytes_passed'] += stats.get('bytes_passed', 0)
-                            total['packets_dropped'] += stats.get('packets_dropped', 0)
-                            total['bytes_dropped'] += stats.get('bytes_dropped', 0)
-                            reasons = stats.get('drop_reasons', [])
+                        ext = cpu_entry['value']
+                        
+                        if isinstance(ext, list):
+                            try:
+                                import struct
+                                data = bytes([int(x, 16) for x in ext])
+                                if len(data) >= 264:
+                                    fields = struct.unpack('<33Q', data[:264])
+                                    total['packets_passed'] += fields[0]
+                                    total['bytes_passed'] += fields[1]
+                                    total['packets_dropped'] += fields[2]
+                                    total['bytes_dropped'] += fields[3]
+                                    total['packets_redirected'] += fields[4]
+                                    total['bytes_redirected'] += fields[5]
+
+                                    for j in range(11):
+                                        total['drop_reasons'][j] += fields[6+j]
+
+                                    total['proto_udp'] += fields[17]
+                                    total['proto_tcp'] += fields[18]
+                                    total['proto_icmp'] += fields[19]
+                                    total['proto_other'] += fields[20]
+
+                                    for j in range(6):
+                                        total['pkt_size_buckets'][j] += fields[21+j]
+
+                                    total['sport_dns'] += fields[27]
+                                    total['sport_ntp'] += fields[28]
+                                    total['sport_ssdp'] += fields[29]
+                                    total['sport_memcached'] += fields[30]
+                                    total['sport_chargen'] += fields[31]
+                                    total['sport_other_reflection'] += fields[32]
+                            except Exception as e:
+                                print(f"Hex parse error: {e}")
+
+                        elif isinstance(ext, dict):
+                            total['packets_passed'] += ext.get('packets_passed', 0)
+                            total['bytes_passed'] += ext.get('bytes_passed', 0)
+                            total['packets_dropped'] += ext.get('packets_dropped', 0)
+                            total['bytes_dropped'] += ext.get('bytes_dropped', 0)
+                            total['packets_redirected'] += ext.get('packets_redirected', 0)
+                            total['bytes_redirected'] += ext.get('bytes_redirected', 0)
+                            
+                            reasons = ext.get('drop_reasons', [])
                             if isinstance(reasons, list):
-                                for i, r in enumerate(reasons[:10]):
-                                    total['drop_reasons'][i] += int(r)
+                                for j, r in enumerate(reasons[:11]):
+                                    total['drop_reasons'][j] += int(r)
+                                    
+                            total['proto_udp'] += ext.get('proto_udp', 0)
+                            total['proto_tcp'] += ext.get('proto_tcp', 0)
+                            total['proto_icmp'] += ext.get('proto_icmp', 0)
+                            total['proto_other'] += ext.get('proto_other', 0)
+                            
+                            buckets = ext.get('pkt_size_buckets', [])
+                            if isinstance(buckets, list):
+                                for j, v in enumerate(buckets[:6]):
+                                    total['pkt_size_buckets'][j] += int(v)
+                                    
+                            total['sport_dns'] += ext.get('sport_dns', 0)
+                            total['sport_ntp'] += ext.get('sport_ntp', 0)
+                            total['sport_ssdp'] += ext.get('sport_ssdp', 0)
+                            total['sport_memcached'] += ext.get('sport_memcached', 0)
+                            total['sport_chargen'] += ext.get('sport_chargen', 0)
+                            total['sport_other_reflection'] += ext.get('sport_other_reflection', 0)
             
             now = time.time()
             interval = now - self.last_update
@@ -194,111 +253,16 @@ class MetricsCollector:
                 self.stats['bytes_dropped'] = total['bytes_dropped']
                 
                 self.stats['drop_reasons'] = {}
-                for i, count in enumerate(total['drop_reasons']):
+                for j, count in enumerate(total['drop_reasons']):
                     if count > 0:
-                        reason = DROP_REASONS.get(i, f"reason_{i}")
+                        reason = DROP_REASONS.get(j, f"reason_{j}")
                         self.stats['drop_reasons'][reason] = count
-                
-                self.prev_stats = total.copy()
-                self.last_update = now
-        except:
-            pass
-    
-    def collect_extended_stats(self):
-        """Collect extended stats from extended_stats_map"""
-        map_id = self.get_map_id('extended_stats_map')
-        if not map_id:
-            return
-        
-        output, _ = self.run_bpftool(['map', 'dump', 'id', str(map_id), '-j'])
-        if not output:
-            return
-        
-        try:
-            entries = json.loads(output)
-            total = {
-                'xdp_pass': 0, 'xdp_drop': 0, 'xdp_tx': 0, 'xdp_redirect': 0,
-                'proto_udp': 0, 'proto_tcp': 0, 'proto_icmp': 0, 'proto_other': 0,
-                'pkt_size_buckets': [0] * 6,
-                'sport_dns': 0, 'sport_ntp': 0, 'sport_ssdp': 0,
-                'sport_memcached': 0, 'sport_chargen': 0, 'sport_other_reflection': 0
-            }
-            
-            for entry in entries:
-                values = entry.get('values', [])
-                for cpu_entry in values:
-                    if isinstance(cpu_entry, dict) and 'value' in cpu_entry:
-                        ext = cpu_entry['value']
                         
-                        # Handle raw hex list (missing BTF)
-                        if isinstance(ext, list):
-                            try:
-                                # Convert hex strings to bytes
-                                import struct
-                                data = bytes([int(x, 16) for x in ext])
-                                # Struct layout: 4 u64 (actions), 4 u64 (protos), 6 u64 (buckets), 6 u64 (sports)
-                                # Total 20 u64s = 160 bytes. Wait, struct size is 256?
-                                # Let's unpack first 20 Qs (160 bytes)
-                                # The struct has padding/failed lookup?
-                                # struct extended_stats is 256 bytes (max_entries=1 percpu often padded to cacheline or power of 2)
-                                # But we only care about the fields we defined.
-                                # Definition:
-                                # u64 xdp_pass, xdp_drop, xdp_tx, xdp_redirect; (4)
-                                # u64 proto_udp, tcp, icmp, other; (4)
-                                # u64 pkt_size_buckets[6]; (6)
-                                # u64 sport_dns, ntp, ssdp, memcached, chargen, other; (6)
-                                # Total fields: 4+4+6+6 = 20 fields. 20 * 8 = 160 bytes.
-                                
-                                if len(data) >= 160:
-                                    fields = struct.unpack('<20Q', data[:160])
-                                    total['xdp_pass'] += fields[0]
-                                    total['xdp_drop'] += fields[1]
-                                    total['xdp_tx'] += fields[2]
-                                    total['xdp_redirect'] += fields[3]
-                                    
-                                    total['proto_udp'] += fields[4]
-                                    total['proto_tcp'] += fields[5]
-                                    total['proto_icmp'] += fields[6]
-                                    total['proto_other'] += fields[7]
-                                    
-                                    for i in range(6):
-                                        total['pkt_size_buckets'][i] += fields[8+i]
-                                        
-                                    total['sport_dns'] += fields[14]
-                                    total['sport_ntp'] += fields[15]
-                                    total['sport_ssdp'] += fields[16]
-                                    total['sport_memcached'] += fields[17]
-                                    total['sport_chargen'] += fields[18]
-                                    total['sport_other_reflection'] += fields[19]
-                            except Exception as e:
-                                print(f"Hex parse error: {e}")
-
-                        elif isinstance(ext, dict):
-                            total['xdp_pass'] += ext.get('xdp_pass', 0)
-                            total['xdp_drop'] += ext.get('xdp_drop', 0)
-                            total['xdp_tx'] += ext.get('xdp_tx', 0)
-                            total['xdp_redirect'] += ext.get('xdp_redirect', 0)
-                            total['proto_udp'] += ext.get('proto_udp', 0)
-                            total['proto_tcp'] += ext.get('proto_tcp', 0)
-                            total['proto_icmp'] += ext.get('proto_icmp', 0)
-                            total['proto_other'] += ext.get('proto_other', 0)
-                            total['sport_dns'] += ext.get('sport_dns', 0)
-                            total['sport_ntp'] += ext.get('sport_ntp', 0)
-                            total['sport_ssdp'] += ext.get('sport_ssdp', 0)
-                            total['sport_memcached'] += ext.get('sport_memcached', 0)
-                            total['sport_chargen'] += ext.get('sport_chargen', 0)
-                            total['sport_other_reflection'] += ext.get('sport_other_reflection', 0)
-                            buckets = ext.get('pkt_size_buckets', [])
-                            if isinstance(buckets, list):
-                                for i, v in enumerate(buckets[:6]):
-                                    total['pkt_size_buckets'][i] += int(v)
-            
-            with self.lock:
                 self.stats['xdp_actions'] = {
-                    'pass': total['xdp_pass'],
-                    'drop': total['xdp_drop'],
-                    'tx': total['xdp_tx'],
-                    'redirect': total['xdp_redirect']
+                    'pass': total['packets_passed'],
+                    'drop': total['packets_dropped'],
+                    'tx': 0,
+                    'redirect': total['packets_redirected']
                 }
                 self.stats['protocols'] = {
                     'udp': total['proto_udp'],
@@ -315,12 +279,12 @@ class MetricsCollector:
                     'chargen': total['sport_chargen'],
                     'other': total['sport_other_reflection']
                 }
+                
+                self.prev_stats = total.copy()
+                self.last_update = now
         except Exception as e:
-            print(f"Error collecting extended stats: {e}")
-            import traceback
-            traceback.print_exc()
-            pass
-    
+            print(f"Error collecting global stats: {e}")
+
     def collect_top_ips(self):
         """Collect top IPs from ip_stats_map"""
         map_id = self.get_map_id('ip_stats_map')
@@ -399,7 +363,7 @@ class MetricsCollector:
     
     def collect_map_entries(self):
         """Collect map entry counts"""
-        maps_to_check = ['rate_limit_map', 'ip_stats_map', 'whitelist_map', 'amp_ports_map']
+        maps_to_check = ['rate_limit_map', 'rate_limit_syn_map', 'rate_limit_icmp_map', 'acl_map', 'amp_ports_map', 'vm_redirect_map', 'config_map', 'global_stats_map']
         entries = {}
         
         for map_name in maps_to_check:
@@ -468,6 +432,10 @@ class MetricsHandler(BaseHTTPRequestHandler):
         lines.append('# HELP xdp_bytes_dropped_total Total bytes dropped')
         lines.append('# TYPE xdp_bytes_dropped_total counter')
         lines.append(f'xdp_bytes_dropped_total {metrics["bytes_dropped"]}')
+        
+        lines.append('# HELP xdp_bytes_redirected_total Total bytes redirected')
+        lines.append('# TYPE xdp_bytes_redirected_total counter')
+        lines.append(f'xdp_bytes_redirected_total {metrics.get("bytes_redirected", 0)}')
         
         # Rate gauges
         lines.append('# HELP xdp_pps_passed Packets per second passed')
