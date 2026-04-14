@@ -36,6 +36,30 @@ def whitelist():
     ips = xdp_wrapper.get_whitelist()
     return render_template('whitelist.html', ips=ips)
 
+@app.route('/blacklist', methods=['GET', 'POST'])
+def blacklist():
+    if request.method == 'POST':
+        action = request.form.get('action')
+        ip = request.form.get('ip')
+
+        if action == 'add' and ip:
+            err = xdp_wrapper.add_blacklist(ip)
+            if err:
+                flash(f'Error adding IP: {err}', 'error')
+            else:
+                flash(f'Added {ip} to blacklist', 'success')
+        elif action == 'remove' and ip:
+            err = xdp_wrapper.remove_blacklist(ip)
+            if err:
+                flash(f'Error removing IP: {err}', 'error')
+            else:
+                flash(f'Removed {ip} from blacklist', 'success')
+
+        return redirect(url_for('blacklist'))
+
+    ips = xdp_wrapper.get_blacklist()
+    return render_template('blacklist.html', ips=ips)
+
 @app.route('/ports', methods=['GET', 'POST'])
 def ports():
     if request.method == 'POST':
@@ -76,9 +100,53 @@ def config():
     config = xdp_wrapper.get_config()
     return render_template('config.html', config=config)
 
+@app.route('/temp-blocked', methods=['GET', 'POST'])
+def temp_blocked():
+    if request.method == 'POST':
+        action = request.form.get('action')
+        ip = request.form.get('ip')
+
+        if action == 'unblock' and ip:
+            err = xdp_wrapper.remove_temp_blocked(ip)
+            if err:
+                flash(f'Error unblocking IP: {err}', 'error')
+            else:
+                flash(f'Unblocked {ip} from temporary block list', 'success')
+
+        return redirect(url_for('temp_blocked'))
+
+    entries = xdp_wrapper.get_temp_blocked()
+    return render_template('temp_blocked.html', entries=entries)
+
+@app.route('/ip-protected', methods=['GET', 'POST'])
+def ip_protected():
+    if request.method == 'POST':
+        action = request.form.get('action')
+        ip = request.form.get('ip')
+
+        if action == 'add' and ip:
+            err = xdp_wrapper.add_vm_redirect(ip)
+            if err:
+                flash(f'Error adding IP Protected: {err}', 'error')
+            else:
+                flash(f'Added IP Protected for {ip}', 'success')
+        elif action == 'remove' and ip:
+            err = xdp_wrapper.remove_vm_redirect(ip)
+            if err:
+                flash(f'Error removing IP Protected: {err}', 'error')
+            else:
+                flash(f'Removed IP Protected for {ip}', 'success')
+
+        return redirect(url_for('ip_protected'))
+
+    entries, err = xdp_wrapper.get_vm_redirects()
+    if err:
+        flash(f'Warning: {err}', 'error')
+    return render_template('ip_protected.html', entries=entries)
+
 if __name__ == '__main__':
     # FIX: Make host/port configurable via environment
     host = os.environ.get('XDP_WEB_HOST', '127.0.0.1')
     port = int(os.environ.get('XDP_WEB_PORT', '5000'))
     debug = os.environ.get('XDP_WEB_DEBUG', 'false').lower() == 'true'
-    app.run(host=host, port=port, debug=debug)
+    app.run(host=host, port=port, debug=True)
