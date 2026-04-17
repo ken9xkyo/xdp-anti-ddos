@@ -701,6 +701,7 @@ xdp_auto_redirect(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph)
     __u32 dst_ip = iph->daddr;
     struct redirect_info *info = bpf_map_lookup_elem(&vm_redirect_map, &dst_ip);
 
+
     if (info) {
         /* Ghi đè MAC address (L2 Rewrite) để Switch đẩy tới VM đích */
         __builtin_memcpy(eth->h_source, info->src_mac, ETH_ALEN);
@@ -710,7 +711,9 @@ xdp_auto_redirect(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph)
         /* Giúp tăng mạnh hiệu năng nhờ vào cơ chế TX bulking của kernel */
         return bpf_redirect_map(&tx_port_map, info->ifindex, 0);
     }
-    return XDP_PASS;
+
+    /* Nếu không tìm thấy IP đích trong bảng redirect → DROP */
+    return XDP_DROP;
 }
 
 /*
@@ -909,14 +912,19 @@ int xdp_anti_ddos(struct xdp_md *ctx)
      * Merged blacklist + whitelist. Longest prefix match thắng.
      */
     __u8 acl = check_acl(src_ip);
-    if (unlikely(acl == ACL_DENY))
-        return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_BLACKLIST, protocol, 0);
+
+    // Kiểm tra IP có trong whitelist trước để tránh trường hợp chặn nhầm
     if (unlikely(acl == ACL_ALLOW)) {
         int ret = xdp_auto_redirect(ctx, eth, iph);
         return emit_verdict(ctx, pkt_size,
-                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_DROP,
                            -1, protocol, 0);
     }
+
+    // Kiểm tra IP có trong blacklist không
+    if (unlikely(acl == ACL_DENY))
+        return emit_verdict(ctx, pkt_size, XDP_DROP, DROP_BLACKLIST, protocol, 0);
+
 
     /* === Bước 6.5: Kiểm tra Temporary Block (Chặn 10 phút) === */
     __u64 *blocked_time = bpf_map_lookup_elem(&temp_block_map, &src_ip);
@@ -969,7 +977,7 @@ int xdp_anti_ddos(struct xdp_md *ctx)
 
         int ret = xdp_auto_redirect(ctx, eth, iph);
         return emit_verdict(ctx, pkt_size,
-                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_DROP,
                            -1, protocol, sport);
     }
 
@@ -1009,7 +1017,7 @@ int xdp_anti_ddos(struct xdp_md *ctx)
 
         int ret = xdp_auto_redirect(ctx, eth, iph);
         return emit_verdict(ctx, pkt_size,
-                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_DROP,
                            -1, protocol, 0);
     }
 
@@ -1031,14 +1039,14 @@ int xdp_anti_ddos(struct xdp_md *ctx)
 
         int ret = xdp_auto_redirect(ctx, eth, iph);
         return emit_verdict(ctx, pkt_size,
-                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                           (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_DROP,
                            -1, protocol, 0);
     }
 
     /* Giao thức khác */
     int ret = xdp_auto_redirect(ctx, eth, iph);
     return emit_verdict(ctx, pkt_size,
-                       (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_PASS,
+                       (ret == XDP_REDIRECT) ? XDP_REDIRECT : XDP_DROP,
                        -1, protocol, 0);
 }
 

@@ -67,7 +67,12 @@ make    # Output -> xdp_anti_ddos.o
 make IFACE=enp94s0f0 OUT_IFACE=enp134s0f1 deploy 
 ```
 
-3. Mở Python CLI UI Server và Web UI:
+3. Gỡ XDP:
+```bash
+make IFACE=enp94s0f0 undeploy
+```
+
+4. Mở Python CLI UI Server và Web UI:
 ```bash
 # Khởi chạy bộ Monitor Prometheus
 nohup python3 prometheus_exporter.py > /dev/null 2>&1 &

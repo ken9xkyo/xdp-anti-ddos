@@ -547,7 +547,7 @@ def main():
                         help='Port to listen on (default: 9101)')
     parser.add_argument('--interval', '-i', type=float, default=1.0,
                         help='Collection interval in seconds (default: 1.0)')
-    parser.add_argument('--bind', '-b', default='0.0.0.0',
+    parser.add_argument('--bind', '-b', default='127.0.0.1',
                         help='Address to bind to (default: 0.0.0.0)')
     args = parser.parse_args()
     

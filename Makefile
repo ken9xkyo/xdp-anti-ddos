@@ -43,7 +43,7 @@ PROG_PIN := $(BPF_PIN_DIR)/xdp_anti_ddos
 MAP_PIN_TX := $(BPF_PIN_DIR)/tx_port_map
 MAP_PIN_VM := $(BPF_PIN_DIR)/vm_redirect_map
 
-.PHONY: all build clean load unload attach detach status init init-maps init-devmap init-jmp init-ports init-config init-redirect test test-redirect help
+.PHONY: all build clean load unload attach detach status init init-maps init-devmap init-jmp init-ports init-config init-redirect test test-redirect help deploy undeploy
 
 # ============================================================================
 # BUILD
@@ -256,6 +256,14 @@ deploy: build unload load attach init
 	@echo "  OUT: $(OUT_IFACE)"
 	@echo "════════════════════════════════════════════════"
 
+# Undeploy hoàn chỉnh: make IFACE=enp94s0f0 undeploy
+undeploy: detach unload
+	@echo ""
+	@echo "════════════════════════════════════════════════"
+	@echo "✓ XDP Anti-DDoS undeployed thành công!"
+	@echo "  IN:  $(IFACE)"
+	@echo "════════════════════════════════════════════════"
+
 # Clean build artifacts
 clean:
 	rm -f $(OUTPUT) *.o
@@ -287,6 +295,7 @@ help:
 	@echo ""
 	@echo "═══ Quick Deploy ═══"
 	@echo "  deploy         - Build + Load + Attach + Init (1 lệnh)"
+	@echo "  undeploy       - Detach + Unload (1 lệnh)"
 	@echo ""
 	@echo "═══ Status / Test ═══"
 	@echo "  status         - Hiển thị trạng thái XDP, maps, redirect"
@@ -305,5 +314,6 @@ help:
 	@echo "  make OUT_IFACE=ens3 init"
 	@echo "  make REDIRECT_IP=118.107.78.137 init-redirect"
 	@echo "  make IFACE=enp94s0f0 OUT_IFACE=ens3 deploy    # Tất cả trong 1 lệnh"
+	@echo "  make IFACE=enp94s0f0 undeploy                 # Gỡ bỏ hoàn toàn"
 	@echo "  make test-redirect                        # Chạy test redirect"
 
